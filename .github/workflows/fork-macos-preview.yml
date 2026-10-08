@@ -37,8 +37,9 @@ jobs:
         with:
           node-version: "24"
           cache: true
-          run-install: |
-            vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+          run-install: false
+      - name: Install bundle dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
       - name: Build macOS ARM64 DMG and ZIP
         shell: bash
         run: |
