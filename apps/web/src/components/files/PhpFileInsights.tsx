@@ -47,8 +47,10 @@ export function PhpFileInsights({
   check,
   onOpenFile,
   onOpenSymbol,
+  section,
 }: {
   check: ReturnType<typeof useMonolithFileCheck>;
+  section?: "queries" | "callers";
   onOpenFile: OpenFile;
   onOpenSymbol?: (
     target: NonNullable<MonolithCheckFileResult["entryChains"]>["targets"][number],
@@ -67,20 +69,32 @@ export function PhpFileInsights({
           : check.status === "failed"
             ? "PHP insights failed."
             : null;
-  if (!waiting && !queries && !callers) return null;
+  const pending =
+    waiting ??
+    (!queries && !callers
+      ? "Waiting for PHP analysis of the saved file."
+      : section === "queries" && !queries
+        ? "No Doctrine query result is available for this file."
+        : section === "callers" && !callers
+          ? "No entry-file or caller result is available for this file."
+          : null);
   return (
     <div
-      className="max-h-64 shrink-0 overflow-auto border-b border-border/60 px-3 py-2 text-xs"
+      className={
+        section
+          ? "space-y-1 text-xs"
+          : "max-h-64 shrink-0 overflow-auto border-b border-border/60 px-3 py-2 text-xs"
+      }
       aria-label="PHP file insights"
     >
-      {waiting ? (
+      {pending ? (
         <p role="status" className="text-muted-foreground">
-          {waiting}
+          {pending}
         </p>
       ) : null}
-      {queries ? (
-        <details open>
-          <summary className="cursor-pointer font-medium">Doctrine queries per method</summary>
+      {queries && section !== "callers" ? (
+        <div>
+          {!section ? <h4 className="font-medium">Doctrine queries per method</h4> : null}
           <AnalysisStatus insight={queries} />
           <p className="text-muted-foreground">
             Static estimates per invocation; runtime behavior and input can change the count.
@@ -104,11 +118,11 @@ export function PhpFileInsights({
               </li>
             ))}
           </ul>
-        </details>
+        </div>
       ) : null}
-      {callers ? (
-        <details className="mt-2">
-          <summary className="cursor-pointer font-medium">Entry files and callers</summary>
+      {callers && section !== "queries" ? (
+        <div className={section ? undefined : "mt-2"}>
+          {!section ? <h4 className="font-medium">Entry files and callers</h4> : null}
           <AnalysisStatus insight={callers} />
           {onOpenSymbol ? (
             <p className="text-muted-foreground">
@@ -184,7 +198,7 @@ export function PhpFileInsights({
               ) : null}
             </details>
           ))}
-        </details>
+        </div>
       ) : null}
     </div>
   );

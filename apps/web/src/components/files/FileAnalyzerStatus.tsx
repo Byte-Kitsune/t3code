@@ -23,7 +23,7 @@ export function FileAnalyzerStatus({
               : null;
   return (
     <details className="shrink-0 border-t border-border/60 text-xs text-muted-foreground">
-      <summary className="cursor-pointer px-3 py-1.5">
+      <summary className="cursor-pointer overflow-hidden px-3 py-1.5 text-ellipsis whitespace-nowrap">
         <span className="font-medium">File checks</span>
         <span role="status" className="ml-2">
           {summary}

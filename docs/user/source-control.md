@@ -274,7 +274,9 @@ another branch. A hosted pull request keeps its own target branch. Opening a sav
 source lines. PHP uses Mago format checks, analysis, and guard; React uses Biome checks. No formatting
 changes are applied. Errors and warnings stay visible inline; informational help opens from a compact
 icon. Expand **File checks** below the source for missing tools, setup details and execution status,
-or **PHP insights** for query budgets and entry chains. These details do not crowd the file header.
+The three **Mago checks**, **Doctrine queries**, and **Entry files and callers** sections above PHP
+source stay visible while loading and start collapsed. Expand each independently for results;
+setup messages stay in the footer.
 Install tools with your project's usual package manager before opening files. Existing analyzer
 configuration is used, including Mago installed in a PHP area's `tools/` Composer project.
 

@@ -99,7 +99,8 @@ import {
 } from "./fileSurfaceChrome";
 import SourceFilePreview from "./ReadOnlySourcePreview";
 import { FileAnalyzerAnnotation } from "./FileAnalyzerAnnotation";
-import { FileAnalysisFooter } from "./FileAnalysisFooter";
+import { FileAnalyzerStatus } from "./FileAnalyzerStatus";
+import { FileAnalysisHeader } from "./FileAnalysisHeader";
 import { syncFileAnalyzerGutter } from "./fileAnalyzerGutter";
 import { PhpCallGraphDialog, type PhpGraphSelection } from "./PhpCallGraphDialog";
 import { openPhpSourceCallGraph } from "./phpSourceClick";
@@ -1402,6 +1403,20 @@ export default function FilePreviewPanel({
           Preview limited to the first 1 MB of a {file.data.byteLength.toLocaleString()} byte file.
         </div>
       ) : null}
+      {!isHostFile && relativePath !== null && /\.php$/i.test(relativePath) ? (
+        <FileAnalysisHeader
+          key={`${environmentId}:${cwd}:${relativePath}`}
+          check={fileCheck}
+          loading={file.isPending}
+          onOpenFile={onOpenFile}
+          {...(graphReady
+            ? {
+                onOpenSymbol: (target) =>
+                  openSourceGraph({ kind: "method", symbol: target.symbol, targets: [target] }),
+              }
+            : {})}
+        />
+      ) : null}
       <PhpCallGraphDialog
         incomplete={sourceGraph?.status === "incomplete"}
         selection={
@@ -1542,19 +1557,10 @@ export default function FilePreviewPanel({
               </DiffWorkerPoolProvider>
             )
           ) : null}
-          {fileCheck.supported && !isHostFile && !isMedia && !isPdf && previewPath && file.data ? (
-            <FileAnalysisFooter
-              key={`${environmentId}:${cwd}:${previewPath}`}
-              check={fileCheck}
-              php={/\.php$/i.test(previewPath)}
-              onOpenFile={onOpenFile}
-              {...(graphReady
-                ? {
-                    onOpenSymbol: (target) =>
-                      openSourceGraph({ kind: "method", symbol: target.symbol, targets: [target] }),
-                  }
-                : {})}
-            />
+          {fileCheck.supported && !isHostFile && !isMedia && !isPdf && previewPath ? (
+            <div className="min-h-7 shrink-0">
+              <FileAnalyzerStatus check={fileCheck} />
+            </div>
           ) : null}
         </div>
         {showExplorer ? (
