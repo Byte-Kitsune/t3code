@@ -474,3 +474,133 @@ it.effect("inherits extension thresholds unless an explicit area override is pre
     }
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it.effect("checks opened YAML through source inspection without native PHP operations", () =>
+  Effect.gen(function* () {
+    const root = yield* insightSetup;
+    yield* write(root, "app/config/services.yaml", "password: secret\n");
+    const calls: AnalyzerExecution.AnalyzerExecutionInput[] = [];
+    const result = yield* Effect.flatMap(
+      MonolithAnalyzerService.MonolithAnalyzerService,
+      (service) => service.checkFile({ cwd: root, path: "app/config/services.yaml" }),
+    ).pipe(
+      Effect.provide(
+        serviceLayer(
+          (input) => {
+            calls.push(input);
+            return passed();
+          },
+          () =>
+            Effect.succeed({
+              queryBudget: { status: "complete", methods: [] },
+              entryChains: { status: "complete", targets: [] },
+              security: {
+                diagnostics: [
+                  {
+                    path: "app/config/services.yaml",
+                    line: 1,
+                    column: 11,
+                    endLine: 1,
+                    endColumn: 17,
+                    severity: "error",
+                    message: "Hardcoded secret",
+                    ruleId: "byte-kitsune/symfony-wiring/no-hardcoded-secret",
+                    tool: "mago",
+                    operation: "check",
+                  },
+                ],
+                run: { tool: "mago", operation: "check", status: "findings", diagnosticCount: 1 },
+              },
+            }),
+        ),
+      ),
+    );
+    expect(calls).toEqual([]);
+    expect(result.diagnostics[0]?.operation).toBe("check");
+    expect(result.runs.map((run) => run.operation)).toEqual(["check"]);
+    expect(result.queryBudget).toBeUndefined();
+    expect(result.entryChains).toBeUndefined();
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("indexes mixed PHP and YAML while keeping native checks PHP-only", () =>
+  Effect.gen(function* () {
+    const root = yield* insightSetup;
+    yield* write(root, "app/config/services.yaml", "password: secret\n");
+    const calls: AnalyzerExecution.AnalyzerExecutionInput[] = [];
+    const result = yield* Effect.flatMap(
+      MonolithAnalyzerService.MonolithAnalyzerService,
+      (service) =>
+        service.indexArea({
+          cwd: root,
+          areaId: "backend",
+          paths: ["app/config/services.yaml", "app/src/Test.php"],
+        }),
+    ).pipe(
+      Effect.provide(
+        serviceLayer(
+          (input) => {
+            calls.push(input);
+            return passed();
+          },
+          () =>
+            Effect.succeed({
+              queryBudget: { status: "complete", methods: [] },
+              entryChains: { status: "complete", targets: [] },
+              security: {
+                diagnostics: [],
+                run: { tool: "mago", operation: "check", status: "passed", diagnosticCount: 0 },
+              },
+            }),
+        ),
+      ),
+    );
+    expect(calls).toHaveLength(3);
+    expect(
+      calls.every(
+        (call) =>
+          call.filePath.endsWith(".php") &&
+          (call.filePaths ?? []).every((file) => file.endsWith(".php")),
+      ),
+    ).toBe(true);
+    expect(result[0]?.result.runs.map((run) => run.operation)).toEqual(["check"]);
+    expect(result[0]?.result.queryBudget).toBeUndefined();
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("loads the tools SDK autoloader for a Symfony-only configuration check", () =>
+  Effect.gen(function* () {
+    const root = yield* setup;
+    yield* write(
+      root,
+      "app/tools/composer.json",
+      JSON.stringify({
+        require: { "carthage-software/mago": "*", "byte-kitsune/mago-symfony-wiring": "*" },
+      }),
+    );
+    yield* write(root, "app/tools/vendor/autoload.php", "<?php");
+    yield* write(root, "app/tools/vendor/bin/mago", "fixture");
+    yield* write(
+      root,
+      "app/tools/vendor/byte-kitsune/mago-symfony-wiring/bin/create-container-reference.php",
+      "<?php",
+    );
+    yield* write(root, "app/config/services.yaml", "password: secret\n");
+    const calls: PhpInsightsExecution.PhpInsightsInput[] = [];
+    yield* Effect.flatMap(MonolithAnalyzerService.MonolithAnalyzerService, (service) =>
+      service.checkFile({ cwd: root, path: "app/config/services.yaml" }),
+    ).pipe(
+      Effect.provide(
+        serviceLayer(passed, (input) => {
+          calls.push(input);
+          return Effect.succeed({
+            queryBudget: { status: "unavailable", methods: [] },
+            entryChains: { status: "unavailable", targets: [] },
+            security: { diagnostics: [] },
+          });
+        }),
+      ),
+    );
+    expect(calls[0]?.autoloadPaths).toContain(`${root}/app/tools/vendor/autoload.php`);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);

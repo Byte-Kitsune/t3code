@@ -1,3 +1,4 @@
+import { PHP_SECURITY_INSIGHTS_SOURCE } from "./PhpSecurityInsightsSource.ts";
 import { PHP_THRESHOLD_INSIGHTS_SOURCE } from "./PhpThresholdInsightsSource.ts";
 import { PHP_ENTRY_INSIGHTS_SOURCE } from "./PhpEntryInsightsSource.ts";
 import { phpQueryInsightsSource } from "./PhpQueryInsights.ts";
@@ -15,7 +16,12 @@ if (!class_exists(\Mago\Sdk\Worker::class)) throw new RuntimeException('The Mago
   PHP_ENTRY_INSIGHTS_SOURCE.replace("declare(strict_types=1);", "") +
   phpQueryInsightsSource +
   PHP_THRESHOLD_INSIGHTS_SOURCE +
+  PHP_SECURITY_INSIGHTS_SOURCE +
   String.raw`
+if (is_string($input['securityOutput'] ?? null)) {
+    file_put_contents($input['securityOutput'], json_encode(t3SecurityInsights($input), JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+}
+if (($input['securityOnly'] ?? false) === true) return;
 if (is_string($input['thresholdOutput'] ?? null)) {
     file_put_contents($input['thresholdOutput'], json_encode(t3DoctrineThresholds($input), JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
 }

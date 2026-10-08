@@ -1,3 +1,4 @@
+import { parse as parseToml } from "smol-toml";
 import type {
   MonolithEntryChains,
   MonolithQueryBudget,
@@ -18,6 +19,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import { decodePhpQueryInsights, normalizePhpQueryInsights } from "./PhpQueryInsights.ts";
 import { normalizePhpEntryInsightsReport } from "./PhpEntryInsights.ts";
 import { normalizePhpThresholdInsights } from "./PhpThresholdInsights.ts";
+import { normalizePhpSecurityInsights, type PhpSecurityInsights } from "./PhpSecurityInsights.ts";
 import { PHP_INSIGHTS_WORKER_SOURCE } from "./PhpInsightsWorkerSource.ts";
 
 const isDockerError = Schema.is(MagoDockerExecution.MagoDockerError);
@@ -38,6 +40,7 @@ export interface PhpInsightsInput {
   readonly runtime?: MonolithMagoDocker;
 }
 export interface PhpInsightsResult {
+  readonly security?: PhpSecurityInsights;
   readonly doctrineQueryThresholds?: MonolithDoctrineQueryThresholds;
   readonly doctrineQueryThresholdsSource?: MonolithDoctrineQueryThresholdsSource;
   readonly queryBudget: MonolithQueryBudget;
@@ -71,6 +74,7 @@ export class PhpInsightsExecution extends Context.Service<
   }
 >()("t3/analyzers/PhpInsightsExecution") {}
 const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
+const decodeConfigJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const isInsightError = Schema.is(PhpInsightsExecutionError);
 const object = (value: unknown): Record<string, unknown> => {
@@ -212,7 +216,7 @@ const make = Effect.gen(function* () {
           if ((yield* fs.realPath(target)) !== target) continue;
           const info = yield* fs.stat(target);
           if (info.type === "Directory") pending.push(target);
-          else if (info.type === "File" && /\.php$/i.test(name))
+          else if (info.type === "File" && /\.(?:php|ya?ml)$/i.test(name))
             entries.push(
               `${target}:${info.size}:${Option.getOrNull(info.mtime)?.getTime() ?? "unknown"}`,
             );
@@ -227,6 +231,27 @@ const make = Effect.gen(function* () {
             Effect.mapError((cause) => new PhpInsightsExecutionError({ stage: "config", cause })),
           )
       : null;
+    const originalConfiguration = yield* Effect.try({
+      try: () => {
+        if (configurationBefore === null) return { hosts: {}, securityDisabled: false };
+        if (Buffer.byteLength(configurationBefore, "utf8") > 1048576)
+          throw new Error("Mago configuration exceeds inspection bounds.");
+        const configured = input.configPath?.toLowerCase().endsWith(".json")
+          ? decodeConfigJson(configurationBefore)
+          : parseToml(configurationBefore);
+        const hosts = object(configured)["extension-hosts"] ?? {};
+        const parsed = object(hosts);
+        if (Object.keys(parsed).length > 32) throw new Error("Too many extension hosts.");
+        const config = object(configured);
+        const rule = object(
+          object(object(config.linter ?? {}).rules ?? {})[
+            "byte-kitsune/symfony-wiring/no-hardcoded-secret"
+          ] ?? {},
+        );
+        return { hosts: parsed, securityDisabled: rule.enabled === false };
+      },
+      catch: (cause) => new PhpInsightsExecutionError({ stage: "config", cause }),
+    });
     const effective = yield* process([
       ...(input.configPath ? ["--config", toolPath(input.configPath)] : []),
       "config",
@@ -279,6 +304,7 @@ const make = Effect.gen(function* () {
         const queryOutput = tempPath("queries.json");
         const graphOutput = tempPath("graph.json");
         const thresholdOutput = tempPath("thresholds.json");
+        const securityOutput = tempPath("security.json");
         const configPath = tempPath("mago.json");
         const worker = tempPath("worker.php");
         const inputPath = tempPath("input.json");
@@ -286,7 +312,8 @@ const make = Effect.gen(function* () {
         const hasPolicy = yield* fs.exists(policyPath);
         if (hasPolicy) yield* safe(policyPath);
         const thresholdCandidates = [paths.join(areaRoot, ".mago", "extension.php")];
-        const originalHosts = effective["extension-hosts"];
+        const originalHosts = originalConfiguration.hosts;
+        const securityCandidates: string[] = [];
         if (
           originalHosts !== null &&
           typeof originalHosts === "object" &&
@@ -309,16 +336,23 @@ const make = Effect.gen(function* () {
                     ? docker.toHost(argument)
                     : paths.resolve(areaRoot, argument);
               } catch {
-                continue;
+                break;
               }
-              if (within(candidate, areaRoot)) thresholdCandidates.push(candidate);
+              if (within(candidate, areaRoot)) {
+                thresholdCandidates.push(candidate);
+                securityCandidates.push(candidate);
+                if (securityCandidates.length > 16)
+                  return yield* new PhpInsightsExecutionError({ stage: "config" });
+              }
+              // Later PHP arguments are data passed to the worker, not executed entrypoints.
+              break;
             }
           }
         }
         thresholdCandidates.push(paths.join(areaRoot, "tools", "mago-worker.php"));
         const thresholdSources = [...new Set(thresholdCandidates)].slice(0, 16);
         const thresholdHostSources: string[] = [];
-        for (const candidate of thresholdSources)
+        for (const candidate of new Set([...thresholdSources, ...securityCandidates]))
           if (yield* fs.exists(candidate)) {
             yield* safe(candidate);
             const info = yield* fs.stat(candidate);
@@ -345,6 +379,21 @@ const make = Effect.gen(function* () {
           queryOutput,
           graphOutput,
           thresholdOutput,
+          securityOutput,
+          securityDisabled: originalConfiguration.securityDisabled,
+          securityCanonical: toolPath(paths.join(areaRoot, ".mago", "extension.php")),
+          securityOnly: !(input.indexPaths ?? [input.relativePath]).some((file) =>
+            /\.php$/i.test(file),
+          ),
+          securitySources: [...new Set(securityCandidates)].map((filePath) => ({
+            filePath: toolPath(filePath),
+          })),
+          securityPaths: (input.indexPaths ?? [input.relativePath]).map((file) => ({
+            areaRelativePath: paths
+              .relative(areaRoot, paths.resolve(input.workspaceRoot, file))
+              .split(paths.sep)
+              .join("/"),
+          })),
           thresholdSources: thresholdSources.map((filePath) => ({
             filePath: toolPath(filePath),
             relativePath: paths.relative(input.workspaceRoot, filePath).split(paths.sep).join("/"),
@@ -353,13 +402,15 @@ const make = Effect.gen(function* () {
           entrypointPaths: input.entrypointPaths ?? ["src/Controller", "src/Command"],
           commentMarkers: input.commentMarkers ?? null,
           indexPaths:
-            input.indexPaths?.map((file) => ({
-              relativePath: file,
-              areaRelativePath: paths
-                .relative(areaRoot, paths.resolve(input.workspaceRoot, file))
-                .split(paths.sep)
-                .join("/"),
-            })) ?? null,
+            input.indexPaths
+              ?.filter((file) => /\.php$/i.test(file))
+              .map((file) => ({
+                relativePath: file,
+                areaRelativePath: paths
+                  .relative(areaRoot, paths.resolve(input.workspaceRoot, file))
+                  .split(paths.sep)
+                  .join("/"),
+              })) ?? (/\.php$/i.test(input.filePath) ? null : []),
         };
         // Keep the effective project snapshot and replace workers only for this
         // read-only run. Existing commands may mutate state or hide entire graphs.
@@ -382,24 +433,63 @@ const make = Effect.gen(function* () {
           yield* fs.writeFileString(inputPath, yield* encodeJson(workerInput));
           yield* fs.writeFileString(configPath, yield* encodeJson(config));
         }
-        yield* process(
-          [
-            "--config",
-            configPath,
-            "--workspace",
-            toolPath(areaRoot),
-            "analyze",
-            "--reporting-format",
-            "json",
-            "--reporting-target",
-            "stdout",
-            "--minimum-report-level",
-            "note",
-          ],
-          { ...globalThis.process.env, NO_COLOR: "1", T3_PHP_INSIGHTS_INPUT: inputPath },
-        ).pipe(
-          Effect.mapError((cause) => new PhpInsightsExecutionError({ stage: "process", cause })),
-        );
+        if (workerInput.securityOnly) {
+          const env = {
+            ...globalThis.process.env,
+            NO_COLOR: "1",
+            T3_PHP_INSIGHTS_INPUT: inputPath,
+          };
+          const checked = yield* docker
+            ? docker
+                .runPhp([worker], env)
+                .pipe(
+                  Effect.mapError(
+                    (cause) => new PhpInsightsExecutionError({ stage: "process", cause }),
+                  ),
+                )
+            : runner
+                .run({
+                  command: "php",
+                  args: [worker],
+                  cwd: input.cwd,
+                  env,
+                  timeout: 60_000,
+                  maxOutputBytes: 4_000_000,
+                  outputMode: "error",
+                  timeoutBehavior: "error",
+                })
+                .pipe(
+                  Effect.mapError(
+                    (cause) => new PhpInsightsExecutionError({ stage: "process", cause }),
+                  ),
+                );
+          if (
+            checked.code !== 0 ||
+            checked.timedOut ||
+            checked.stdoutTruncated ||
+            checked.stderrTruncated
+          )
+            return yield* new PhpInsightsExecutionError({ stage: "process" });
+        } else {
+          yield* process(
+            [
+              "--config",
+              configPath,
+              "--workspace",
+              toolPath(areaRoot),
+              "analyze",
+              "--reporting-format",
+              "json",
+              "--reporting-target",
+              "stdout",
+              "--minimum-report-level",
+              "note",
+            ],
+            { ...globalThis.process.env, NO_COLOR: "1", T3_PHP_INSIGHTS_INPUT: inputPath },
+          ).pipe(
+            Effect.mapError((cause) => new PhpInsightsExecutionError({ stage: "process", cause })),
+          );
+        }
         const sidecar = Effect.fnUntraced(function* (file: string) {
           if (dockerTemp)
             return yield* dockerTemp.read(file.slice(temp.length + 1), 16 * 1024 * 1024);
@@ -448,6 +538,23 @@ const make = Effect.gen(function* () {
           Effect.flatMap((value) => Effect.try(() => normalizePhpThresholdInsights(value))),
           Effect.result,
         );
+        const securitySources = new Map<string, string>();
+        for (const sourcePath of input.indexPaths ?? [input.relativePath])
+          securitySources.set(
+            sourcePath,
+            yield* fs.readFileString(paths.resolve(input.workspaceRoot, sourcePath)),
+          );
+        const securityReport = yield* sidecar(securityOutput).pipe(
+          Effect.flatMap(decodeJson),
+          Effect.flatMap((value) =>
+            Effect.try(() => normalizePhpSecurityInsights(value, input.areaPath, securitySources)),
+          ),
+          Effect.result,
+        );
+        const security =
+          securityReport._tag === "Success"
+            ? securityReport.success
+            : normalizePhpSecurityInsights({ status: "failed" }, input.areaPath, securitySources);
         const thresholdFields =
           thresholds._tag === "Success"
             ? thresholds.success
@@ -510,6 +617,7 @@ const make = Effect.gen(function* () {
         }
         return {
           ...thresholdFields,
+          security,
           ...(indexedFiles === undefined ? {} : { indexedFiles }),
           queryBudget:
             query._tag === "Success"

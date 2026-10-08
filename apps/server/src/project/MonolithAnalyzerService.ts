@@ -190,7 +190,7 @@ const make = Effect.gen(function* () {
       const tool = area.kind === "php" ? "mago" : "biome";
       const applicable =
         tool === "mago"
-          ? /\.php$/i.test(input.path)
+          ? /\.(?:php|ya?ml)$/i.test(input.path)
           : /\.(?:[cm]?[jt]sx?|jsonc?|css)$/i.test(input.path);
       if (applicable) {
         const installations = yield* discovery
@@ -206,8 +206,15 @@ const make = Effect.gen(function* () {
           (!runtime
             ? installations[0]?.tools.find((candidate) => candidate.available)
             : undefined) ?? installations[0]?.tools[0];
+        const phpSources = [...indexedSources.values()].filter((source) =>
+          /\.php$/i.test(source.file),
+        );
         const operations =
-          tool === "mago" ? (["format", "analyze", "guard"] as const) : (["check"] as const);
+          tool === "mago"
+            ? /\.php$/i.test(file) || phpSources.length > 0
+              ? (["format", "analyze", "guard"] as const)
+              : []
+            : (["check"] as const);
         for (const operation of operations) {
           if (!installation || (!installation.available && !runtime)) {
             runs.push({
@@ -224,8 +231,10 @@ const make = Effect.gen(function* () {
               (script) => script.operation === operation && script.configPath !== undefined,
             )?.configPath ?? installation.configPath;
           const execute = (
-            sourceFile = file,
-            sourceContents = contents,
+            sourceFile = tool === "mago" && !/\.php$/i.test(file) ? phpSources[0]!.file : file,
+            sourceContents = tool === "mago" && !/\.php$/i.test(file)
+              ? phpSources[0]!.contents
+              : contents,
             batch = indexPaths !== undefined,
           ) =>
             execution
@@ -239,12 +248,13 @@ const make = Effect.gen(function* () {
                 sourceText: sourceContents,
                 ...(batch
                   ? {
-                      filePaths: [...indexedSources.values()].map((source) => source.file),
+                      filePaths: (tool === "mago" ? phpSources : [...indexedSources.values()]).map(
+                        (source) => source.file,
+                      ),
                       sourceTexts: Object.fromEntries(
-                        [...indexedSources].map(([sourcePath, source]) => [
-                          sourcePath,
-                          source.contents,
-                        ]),
+                        [...indexedSources]
+                          .filter(([, source]) => tool !== "mago" || /\.php$/i.test(source.file))
+                          .map(([sourcePath, source]) => [sourcePath, source.contents]),
                       ),
                     }
                   : {}),
@@ -255,7 +265,7 @@ const make = Effect.gen(function* () {
           const results =
             indexPaths !== undefined && operation === "format"
               ? yield* Effect.forEach(
-                  [...indexedSources.values()],
+                  tool === "mago" ? phpSources : [...indexedSources.values()],
                   (source) => execute(source.file, source.contents, false),
                   { concurrency: 2 },
                 )
@@ -302,6 +312,13 @@ const make = Effect.gen(function* () {
             (candidate) =>
               candidate.architectureGraph && (runtime || candidate.architectureGraph.available),
           )?.architectureGraph;
+          const symfony = insightTools.find(
+            (candidate) =>
+              candidate.symfonyWiringReference &&
+              (runtime ||
+                candidate.symfonyWiringReference.autoloadAvailable ||
+                candidate.symfonyWiringReference.generatorAvailable),
+          )?.symfonyWiringReference;
           const reference = insightTools.find(
             (candidate) =>
               candidate.symfonyWiringReference &&
@@ -310,7 +327,7 @@ const make = Effect.gen(function* () {
           if (
             !installation ||
             (!installation.available && !runtime) ||
-            (!doctrine && !architecture)
+            (!doctrine && !architecture && !symfony)
           ) {
             insights = {
               queryBudget: {
@@ -325,14 +342,18 @@ const make = Effect.gen(function* () {
               },
             };
           } else {
+            const symfonyToolsAutoload = symfony
+              ? path.resolve(root, path.dirname(symfony.generatorPath), "../../../autoload.php")
+              : undefined;
             const autoloadPaths = [
               ...new Set(
                 [
+                  symfonyToolsAutoload && (runtime || (yield* fs.exists(symfonyToolsAutoload)))
+                    ? path.relative(root, symfonyToolsAutoload)
+                    : undefined,
                   doctrine?.autoloadPath,
                   architecture?.autoloadPath,
-                  reference && (runtime || reference.autoloadAvailable)
-                    ? reference.autoloadPath
-                    : undefined,
+                  symfony?.autoloadAvailable ? symfony.autoloadPath : undefined,
                 ].filter((value): value is string => value !== undefined),
               ),
             ].map((file) => path.resolve(root, file));
@@ -372,6 +393,21 @@ const make = Effect.gen(function* () {
               analyzed._tag === "Success"
                 ? analyzed.success
                 : {
+                    ...(symfony
+                      ? {
+                          security: {
+                            diagnostics: [],
+                            run: {
+                              tool: "mago",
+                              operation: "check",
+                              status: "failed",
+                              diagnosticCount: 0,
+                              message:
+                                "Symfony configuration security could not inspect this source snapshot.",
+                            },
+                          },
+                        }
+                      : {}),
                     queryBudget: {
                       status: "failed",
                       message: analyzed.failure.message,
@@ -383,6 +419,10 @@ const make = Effect.gen(function* () {
                       targets: [],
                     },
                   };
+          }
+          if (insights?.security) {
+            diagnostics.push(...insights.security.diagnostics);
+            if (insights.security.run) runs.push(insights.security.run);
           }
         }
       }
@@ -453,7 +493,9 @@ const make = Effect.gen(function* () {
       runs,
       ...(insights === undefined
         ? {}
-        : { queryBudget: insights.queryBudget, entryChains: insights.entryChains }),
+        : /\.php$/i.test(input.path)
+          ? { queryBudget: insights.queryBudget, entryChains: insights.entryChains }
+          : {}),
       ...(indexPaths === undefined
         ? {}
         : {
@@ -466,23 +508,27 @@ const make = Effect.gen(function* () {
                   areaId: area?.id ?? null,
                   revision: source.revision,
                   diagnostics: fileDiagnostics,
-                  runs: runs.map((run) => ({
-                    ...run,
-                    diagnosticCount: fileDiagnostics.filter(
-                      (item) => item.operation === run.operation,
-                    ).length,
-                    status:
-                      run.status === "findings"
-                        ? fileDiagnostics.some((item) => item.operation === run.operation)
-                          ? ("findings" as const)
-                          : ("passed" as const)
-                        : run.status,
-                  })),
-                  ...(indexed
-                    ? { queryBudget: indexed.queryBudget, entryChains: indexed.entryChains }
-                    : insights
-                      ? { queryBudget: insights.queryBudget, entryChains: insights.entryChains }
-                      : {}),
+                  runs: runs
+                    .filter((run) => /\.php$/i.test(sourcePath) || run.operation === "check")
+                    .map((run) => ({
+                      ...run,
+                      diagnosticCount: fileDiagnostics.filter(
+                        (item) => item.operation === run.operation,
+                      ).length,
+                      status:
+                        run.status === "findings"
+                          ? fileDiagnostics.some((item) => item.operation === run.operation)
+                            ? ("findings" as const)
+                            : ("passed" as const)
+                          : run.status,
+                    })),
+                  ...(!/\.php$/i.test(sourcePath) && area?.kind === "php"
+                    ? {}
+                    : indexed
+                      ? { queryBudget: indexed.queryBudget, entryChains: indexed.entryChains }
+                      : insights
+                        ? { queryBudget: insights.queryBudget, entryChains: insights.entryChains }
+                        : {}),
                   ...thresholdFields,
                 },
               };

@@ -29,7 +29,10 @@ const setup = Effect.gen(function* () {
   yield* fs.writeFileString(`${root}/app/tools/vendor/bin/mago`, "fixture");
   yield* fs.writeFileString(`${root}/app/tools/vendor/autoload.php`, "<?php");
   yield* fs.writeFileString(`${root}/app/src/Test.php`, "<?php class Test {}");
-  yield* fs.writeFileString(`${root}/app/mago.toml`, '[source]\npaths=["src"]');
+  yield* fs.writeFileString(
+    `${root}/app/mago.toml`,
+    '[source]\npaths=["src"]\n[extension-hosts.original]\ncommand=["php","tools/mago-worker.php"]',
+  );
   return {
     command: `${root}/app/tools/vendor/bin/mago`,
     cwd: `${root}/app`,
@@ -52,6 +55,9 @@ function runLayer(run: ProcessRunner.ProcessRunner["Service"]["run"]) {
 function mockRunner(
   options: {
     malformedQuery?: boolean;
+    securityReport?: unknown;
+    expectedSecurityDisabled?: boolean;
+    expectedSecurityPaths?: readonly { areaRelativePath: string }[];
     missingGraph?: boolean;
     changeSource?: boolean;
     changeConfig?: boolean;
@@ -80,7 +86,7 @@ function mockRunner(
               ...(options.differentWorkspace ? { workspace: `${input.cwd}/nested` } : {}),
             },
             analyzer: { ignore: ["mixed-argument"] },
-            "extension-hosts": { original: { command: ["php", "tools/mago-worker.php"] } },
+            "extension-hosts": {},
           }),
         );
       }
@@ -96,6 +102,16 @@ function mockRunner(
           true,
         );
       }
+      if (options.expectedSecurityDisabled !== undefined)
+        expect(data.securityDisabled).toBe(options.expectedSecurityDisabled);
+      if (data.securityOutput)
+        yield* fs.writeFileString(
+          data.securityOutput,
+          encode(options.securityReport ?? { status: "inactive" }),
+        );
+      if (options.expectedSecurityPaths)
+        expect(data.securityPaths).toEqual(options.expectedSecurityPaths);
+      expect(data.securitySources).toEqual([{ filePath: `${input.cwd}/tools/mago-worker.php` }]);
       if (data.thresholdOutput)
         yield* fs.writeFileString(
           data.thresholdOutput,
@@ -108,6 +124,11 @@ function mockRunner(
         );
       if (options.expectedCommentMarkers !== undefined)
         expect(data.commentMarkers).toEqual(options.expectedCommentMarkers);
+      if (input.command === "php") {
+        expect(data.indexPaths).toEqual([]);
+        expect(data.securityOnly).toBe(true);
+        return output("");
+      }
       const config = decode(yield* fs.readFileString(input.args[1]!)) as {
         source: { paths: string[] };
         analyzer: { ignore: string[] };
@@ -482,4 +503,108 @@ it.effect(
       expect(unresolved.doctrineQueryThresholds).toBeUndefined();
       expect(unresolved.doctrineQueryThresholdsSource?.kind).toBe("unresolved");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("inspects YAML paths independently without sending them to Doctrine", () =>
+  Effect.gen(function* () {
+    const input = yield* setup;
+    const fs = yield* FileSystem.FileSystem;
+    yield* fs.makeDirectory(`${input.workspaceRoot}/app/config`);
+    yield* fs.writeFileString(
+      `${input.workspaceRoot}/app/config/services.yaml`,
+      "password: secret\n",
+    );
+    const runner = mockRunner({
+      expectedSecurityPaths: [
+        { areaRelativePath: "src/Test.php" },
+        { areaRelativePath: "config/services.yaml" },
+      ],
+      securityReport: {
+        schema_version: 1,
+        column_encoding: "utf8_bytes",
+        issues: [
+          {
+            code: "byte-kitsune/symfony-wiring/no-hardcoded-secret",
+            severity: "error",
+            path: "config/services.yaml",
+            line: 1,
+            column: 11,
+            end_line: 1,
+            end_column: 17,
+          },
+        ],
+        incomplete: [],
+      },
+    });
+    const result = yield* Effect.flatMap(PhpInsightsExecution.PhpInsightsExecution, (service) =>
+      service.run({ ...input, indexPaths: [input.relativePath, "app/config/services.yaml"] }),
+    ).pipe(Effect.provide(runLayer(runner.run)));
+    expect(result.security?.diagnostics[0]?.path).toBe("app/config/services.yaml");
+    expect(result.security?.run?.status).toBe("findings");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("runs standalone YAML inspection without a PHP analysis snapshot", () =>
+  Effect.gen(function* () {
+    const input = yield* setup;
+    const fs = yield* FileSystem.FileSystem;
+    yield* fs.makeDirectory(`${input.workspaceRoot}/app/config`);
+    yield* fs.writeFileString(
+      `${input.workspaceRoot}/app/config/services.yaml`,
+      "password: secret\n",
+    );
+    const runner = mockRunner({
+      securityReport: {
+        schema_version: 1,
+        column_encoding: "utf8_bytes",
+        issues: [],
+        incomplete: [],
+      },
+    });
+    const result = yield* Effect.flatMap(PhpInsightsExecution.PhpInsightsExecution, (service) =>
+      service.run({
+        ...input,
+        filePath: `${input.workspaceRoot}/app/config/services.yaml`,
+        relativePath: "app/config/services.yaml",
+      }),
+    ).pipe(Effect.provide(runLayer(runner.run)));
+    expect(result.security?.run?.status).toBe("passed");
+    expect(runner.calls.map((call) => call.command)).toEqual([input.command, "php"]);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("recovers configured worker hosts from JSON when Mago strips extension hosts", () =>
+  Effect.gen(function* () {
+    const input = yield* setup;
+    const fs = yield* FileSystem.FileSystem;
+    const configPath = `${input.workspaceRoot}/app/mago.json`;
+    yield* fs.writeFileString(
+      configPath,
+      encode({
+        source: { paths: ["src"] },
+        "extension-hosts": { security: { command: ["php", "tools/mago-worker.php"] } },
+      }),
+    );
+    const runner = mockRunner();
+    yield* Effect.flatMap(PhpInsightsExecution.PhpInsightsExecution, (service) =>
+      service.run({ ...input, configPath }),
+    ).pipe(Effect.provide(runLayer(runner.run)));
+    expect(runner.calls[0]?.args).toContain("--no-extensions");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("honors an explicitly disabled native Symfony security rule", () =>
+  Effect.gen(function* () {
+    const input = yield* setup;
+    const fs = yield* FileSystem.FileSystem;
+    yield* fs.writeFileString(
+      input.configPath,
+      '[source]\npaths=["src"]\n[extension-hosts.original]\ncommand=["php","tools/mago-worker.php"]\n[linter.rules."byte-kitsune/symfony-wiring/no-hardcoded-secret"]\nenabled=false',
+    );
+    const runner = mockRunner({ expectedSecurityDisabled: true });
+    const result = yield* Effect.flatMap(PhpInsightsExecution.PhpInsightsExecution, (service) =>
+      service.run(input),
+    ).pipe(Effect.provide(runLayer(runner.run)));
+    expect(result.security?.run).toBeUndefined();
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
