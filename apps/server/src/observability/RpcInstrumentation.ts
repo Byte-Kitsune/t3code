@@ -132,6 +132,8 @@ const RPC_AGGREGATES = {
   [WS_METHODS.projectsMonolithDiscover]: "workspace",
   [WS_METHODS.projectsMonolithSave]: "workspace",
   [WS_METHODS.projectsMonolithAnalyzers]: "workspace",
+  [WS_METHODS.projectsMonolithIndex]: "workspace",
+  [WS_METHODS.projectsMonolithIndexStatus]: "workspace",
   [WS_METHODS.projectsMonolithCheckFile]: "workspace",
   [WS_METHODS.projectsMonolithGenerateReferences]: "workspace",
   [WS_METHODS.projectsReadFile]: "workspace",

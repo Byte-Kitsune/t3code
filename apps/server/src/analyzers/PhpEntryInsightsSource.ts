@@ -68,6 +68,20 @@ function t3EntryInsightsExtension(array $input): ?Extension
     $observer = static function (array $snapshot) use ($write): void {
         $write(['status' => 'snapshot', 'snapshot' => $snapshot]);
     };
+    $api = is_string($policy) ? 'create' : 'inspect';
+    $options = [];
+    if (method_exists(ArchitectureGraphExtension::class, $api)) {
+        foreach ((new ReflectionMethod(ArchitectureGraphExtension::class, $api))->getParameters() as $parameter) {
+            if ($parameter->getName() === 'commentMarkers') {
+                $options['commentMarkers'] = $input['commentMarkers'] ?? null;
+                break;
+            }
+        }
+    }
+    if (isset($input['commentMarkers']) && !array_key_exists('commentMarkers', $options)) {
+        $write(['status' => 'unsupported', 'message' => 'The installed architecture extension does not support configured comment markers. Upgrade it to refresh annotated graphs.']);
+        return null;
+    }
     if (!is_string($policy)) {
         if (!method_exists(ArchitectureGraphExtension::class, 'inspect')) {
             $write(['status' => 'unsupported', 'message' => 'The installed architecture extension lacks the inspection API.']);
@@ -76,6 +90,7 @@ function t3EntryInsightsExtension(array $input): ?Extension
         return ArchitectureGraphExtension::inspect(
             $root, $input['entrypointPaths'] ?? ['src/Controller', 'src/Command'], $observer,
             $classBindings, $servicesComplete, $serviceBindings, $constructorBindings,
+            ...$options,
         );
     }
     return ArchitectureGraphExtension::create(
@@ -85,7 +100,7 @@ function t3EntryInsightsExtension(array $input): ?Extension
         $servicesComplete,
         $serviceBindings,
         $constructorBindings,
-        graphObserver: $observer,
+        ...['graphObserver' => $observer, ...$options],
     );
 }
 `;

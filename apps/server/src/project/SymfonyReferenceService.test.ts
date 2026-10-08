@@ -120,6 +120,7 @@ it.layer(base)("SymfonyReferenceService", (it) => {
           expect(input.runtime.service).toBe("php");
           expect(input.areaPath).toBe("api");
           return Effect.succeed({
+            composeArgs: ["compose"],
             hostAreaRoot: `${root}/api`,
             containerAreaRoot: "/srv/api",
             toContainer: (path) => path.replace(root, "/srv"),

@@ -10,12 +10,64 @@ import {
   validateMonolithAreas,
   editMonolithMagoDocker,
   normalizeMonolithMagoDocker,
+  editMonolithDoctrineThresholdOverride,
 } from "./MonolithAreasPanel.logic";
 
 const phpRoot: MonolithArea = { id: "php-root", name: "PHP", path: ".", kind: "php" };
 const config: MonolithConfig = { version: 1, initialized: true, areas: [phpRoot] };
 
 describe("Monolith area editing", () => {
+  it("inherits extension configuration unless a T3 threshold override is explicitly enabled", () => {
+    expect(createMonolithAreaDraft(config).areas[0]?.doctrineQueryThresholds).toBeUndefined();
+    const custom = {
+      ...phpRoot,
+      commentMarkers: [],
+      doctrineQueryThresholds: { warning: 2, error: 8 },
+    };
+    expect(editMonolithDoctrineThresholdOverride(custom, true).doctrineQueryThresholds).toEqual({
+      warning: 2,
+      error: 8,
+    });
+    expect(editMonolithDoctrineThresholdOverride(custom, false)).toEqual({
+      ...phpRoot,
+      commentMarkers: [],
+    });
+    expect(editMonolithDoctrineThresholdOverride(phpRoot, true).doctrineQueryThresholds).toEqual({
+      warning: 10,
+      error: 50,
+    });
+  });
+  it("permits disabling comment hints while rejecting ambiguous or invalid custom markers", () => {
+    expect(validateMonolithAreas([{ ...phpRoot, commentMarkers: [] }])).toBeNull();
+    expect(
+      validateMonolithAreas([
+        { ...phpRoot, commentMarkers: [{ marker: "@todo", severity: "warning" }] },
+      ]),
+    ).toBeNull();
+    for (const commentMarkers of [
+      [{ marker: "", severity: "info" as const }],
+      [{ marker: "line\nbreak", severity: "info" as const }],
+      [
+        { marker: "@todo", severity: "info" as const },
+        { marker: "@TODO", severity: "warning" as const },
+      ],
+    ])
+      expect(validateMonolithAreas([{ ...phpRoot, commentMarkers }])).not.toBeNull();
+  });
+  it("keeps query thresholds through draft reconciliation and prevents invalid threshold saves", () => {
+    const configured = { ...phpRoot, doctrineQueryThresholds: { warning: 5, error: 20 } };
+    const draft = createMonolithAreaDraft({ ...config, areas: [configured] });
+    expect(
+      reconcileMonolithAreaDraft(draft, { ...config, areas: [configured] }).areas[0]
+        ?.doctrineQueryThresholds,
+    ).toEqual({ warning: 5, error: 20 });
+    expect(validateMonolithAreas([configured])).toBeNull();
+    expect(
+      validateMonolithAreas([
+        { ...configured, doctrineQueryThresholds: { warning: 20, error: 5 } },
+      ]),
+    ).toContain("warning below error");
+  });
   it("enables Docker per PHP area, preserves overrides while renaming service and fully disables it when cleared", () => {
     const enabled = editMonolithMagoDocker(phpRoot, "service", "php");
     const custom = editMonolithMagoDocker(enabled, "containerPath", "/app");

@@ -37,6 +37,12 @@ const TerminalSessionInput = Schema.Struct({
 });
 export type TerminalSessionInput = Schema.Codec.Encoded<typeof TerminalSessionInput>;
 
+export const TerminalComposeInput = Schema.Struct({
+  areaId: TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(1100)),
+  mode: Schema.Literals(["shell", "logs"]),
+});
+export type TerminalComposeInput = typeof TerminalComposeInput.Type;
+
 export const TerminalOpenInput = Schema.Struct({
   ...TerminalSessionInput.fields,
   cwd: TrimmedNonEmptyStringSchema,
@@ -45,6 +51,7 @@ export const TerminalOpenInput = Schema.Struct({
   rows: Schema.optional(TerminalRowsSchema),
   env: Schema.optional(TerminalEnvSchema),
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  compose: Schema.optional(TerminalComposeInput),
 });
 export type TerminalOpenInput = typeof TerminalOpenInput.Type;
 
@@ -56,6 +63,7 @@ export const TerminalAttachInput = Schema.Struct({
   rows: Schema.optional(TerminalRowsSchema),
   env: Schema.optional(TerminalEnvSchema),
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  compose: Schema.optional(TerminalComposeInput),
   restartIfNotRunning: Schema.optional(Schema.Boolean),
 });
 export type TerminalAttachInput = typeof TerminalAttachInput.Type;
@@ -87,6 +95,7 @@ export const TerminalRestartInput = Schema.Struct({
   rows: TerminalRowsSchema,
   env: Schema.optional(TerminalEnvSchema),
   providerInstanceId: Schema.optional(ProviderInstanceId),
+  compose: Schema.optional(TerminalComposeInput),
 });
 export type TerminalRestartInput = typeof TerminalRestartInput.Type;
 
@@ -371,7 +380,13 @@ export class TerminalResizeError extends Schema.TaggedError<TerminalResizeError>
   }
 }
 
+export class TerminalComposeError extends Schema.TaggedError<TerminalComposeError>()(
+  "TerminalComposeError",
+  { message: Schema.String, cause: Schema.optional(Schema.Defect()) },
+) {}
+
 export const TerminalError = Schema.Union([
+  TerminalComposeError,
   TerminalCwdError,
   TerminalHistoryError,
   TerminalSessionLookupError,

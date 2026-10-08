@@ -1,3 +1,7 @@
+import { PhpQueryAnnotation } from "./PhpQueryAnnotation";
+import { PhpCommentAnnotation } from "./PhpCommentAnnotation";
+import type { PhpQueryAnnotation as QueryAnnotation } from "./phpQueryAnnotations";
+import type { PhpCommentAnnotation as CommentAnnotation } from "./phpCommentAnnotations";
 import { File, type FileOptions, Virtualizer } from "@pierre/diffs/react";
 
 import { DiffWorkerPoolProvider } from "~/components/DiffWorkerPoolProvider";
@@ -24,6 +28,9 @@ export default function ReadOnlySourcePreview(props: {
   readonly name: string;
   readonly text: string;
   readonly cacheKey?: string;
+  readonly queries?: readonly QueryAnnotation[];
+  readonly devComments?: readonly CommentAnnotation[];
+  readonly onOpenFile?: ((path: string, line?: number) => void) | undefined;
   readonly diagnostics?: readonly MonolithAnalyzerDiagnostic[];
   readonly onTokenClick?: FileOptions<FileAnalyzerAnnotationGroup, undefined>["onTokenClick"];
   readonly onPostRender?: FileOptions<FileAnalyzerAnnotationGroup, undefined>["onPostRender"];
@@ -38,9 +45,21 @@ export default function ReadOnlySourcePreview(props: {
         config={{ overscrollSize: 600, intersectionObserverMargin: 1200 }}
       >
         <File<FileAnalyzerAnnotationGroup>
-          lineAnnotations={mergeFileAnalyzerAnnotations([], props.diagnostics ?? [])}
+          lineAnnotations={mergeFileAnalyzerAnnotations(
+            [],
+            props.diagnostics ?? [],
+            props.queries,
+            props.devComments,
+          )}
           renderAnnotation={(annotation) => (
-            <FileAnalyzerAnnotation diagnostics={annotation.metadata.diagnostics ?? []} />
+            <>
+              <FileAnalyzerAnnotation diagnostics={annotation.metadata.diagnostics ?? []} />
+              <PhpQueryAnnotation methods={annotation.metadata.queries ?? []} />
+              <PhpCommentAnnotation
+                comments={annotation.metadata.devComments ?? []}
+                onOpenFile={props.onOpenFile}
+              />
+            </>
           )}
           file={{
             name: props.name,

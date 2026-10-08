@@ -1,3 +1,4 @@
+import { PHP_THRESHOLD_INSIGHTS_SOURCE } from "./PhpThresholdInsightsSource.ts";
 import { PHP_ENTRY_INSIGHTS_SOURCE } from "./PhpEntryInsightsSource.ts";
 import { phpQueryInsightsSource } from "./PhpQueryInsights.ts";
 
@@ -13,7 +14,11 @@ if (!class_exists(\Mago\Sdk\Worker::class)) throw new RuntimeException('The Mago
 ` +
   PHP_ENTRY_INSIGHTS_SOURCE.replace("declare(strict_types=1);", "") +
   phpQueryInsightsSource +
+  PHP_THRESHOLD_INSIGHTS_SOURCE +
   String.raw`
+if (is_string($input['thresholdOutput'] ?? null)) {
+    file_put_contents($input['thresholdOutput'], json_encode(t3DoctrineThresholds($input), JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+}
 final class T3QueryInsightsHook implements \Mago\Sdk\Analyzer\AfterAnalysisHook
 {
     public function __construct(private readonly array $input, private readonly array $bindings, private readonly array $constructors) {}

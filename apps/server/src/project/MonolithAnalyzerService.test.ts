@@ -374,3 +374,103 @@ it.effect("uses the configured Docker runtime despite missing host vendor and ex
     expect(result.queryBudget?.status).toBe("complete");
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it.effect("indexes PHP files with one analyze/guard and one shared companion run", () =>
+  Effect.gen(function* () {
+    const root = yield* insightSetup;
+    yield* write(root, "app/src/Other.php", "<?php class Other {}");
+    const checks: AnalyzerExecution.AnalyzerExecutionInput[] = [];
+    const companions: PhpInsightsExecution.PhpInsightsInput[] = [];
+    const result = yield* Effect.flatMap(
+      MonolithAnalyzerService.MonolithAnalyzerService,
+      (service) =>
+        service.indexArea({
+          cwd: root,
+          areaId: "backend",
+          paths: ["app/src/Test.php", "app/src/Other.php"],
+        }),
+    ).pipe(
+      Effect.provide(
+        serviceLayer(
+          (input) => {
+            checks.push(input);
+            return passed();
+          },
+          (input) => {
+            companions.push(input);
+            const queryBudget = { status: "complete" as const, methods: [] };
+            const entryChains = { status: "complete" as const, targets: [] };
+            return Effect.succeed({
+              queryBudget,
+              entryChains,
+              indexedFiles: input.indexPaths!.map((path) => ({ path, queryBudget, entryChains })),
+            });
+          },
+        ),
+      ),
+    );
+    expect(checks.map((input) => input.operation)).toEqual([
+      "format",
+      "format",
+      "analyze",
+      "guard",
+    ]);
+    expect(
+      checks
+        .filter((input) => input.operation !== "format")
+        .every((input) => input.filePaths?.length === 2),
+    ).toBe(true);
+    expect(companions).toHaveLength(1);
+    expect(result.map((item) => item.path)).toEqual(["app/src/Test.php", "app/src/Other.php"]);
+    expect(
+      result.every(
+        (item) =>
+          item.result.revision.length === 64 && item.result.entryChains?.status === "complete",
+      ),
+    ).toBe(true);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("inherits extension thresholds unless an explicit area override is present", () =>
+  Effect.gen(function* () {
+    const root = yield* insightSetup;
+    for (const override of [false, true]) {
+      yield* write(
+        root,
+        ".t3/monolith.json",
+        JSON.stringify({
+          version: 1,
+          initialized: true,
+          areas: [
+            {
+              id: "backend",
+              name: "Backend",
+              path: "app",
+              kind: "php",
+              ...(override ? { doctrineQueryThresholds: { warning: 8, error: 50 } } : {}),
+            },
+          ],
+        }),
+      );
+      const result = yield* Effect.flatMap(
+        MonolithAnalyzerService.MonolithAnalyzerService,
+        (service) => service.checkFile({ cwd: root, path: "app/src/Test.php" }),
+      ).pipe(
+        Effect.provide(
+          serviceLayer(passed, () =>
+            Effect.succeed({
+              queryBudget: { status: "complete", methods: [] },
+              entryChains: { status: "complete", targets: [] },
+              doctrineQueryThresholds: { warning: 12, error: 30 },
+              doctrineQueryThresholdsSource: { kind: "extension", path: "app/.mago/extension.php" },
+            }),
+          ),
+        ),
+      );
+      expect(result.doctrineQueryThresholds).toEqual(
+        override ? { warning: 8, error: 50 } : { warning: 12, error: 30 },
+      );
+      expect(result.doctrineQueryThresholdsSource?.kind).toBe(override ? "override" : "extension");
+    }
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);

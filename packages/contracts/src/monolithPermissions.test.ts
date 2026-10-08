@@ -26,6 +26,12 @@ describe("monolith RPC permissions", () => {
       [],
     );
   });
+  it("requires analyzer privileges for background indexing", () => {
+    expect(clientRpcRequiredScopes(WS_METHODS.projectsMonolithIndex, { cwd: "/repo" })).toEqual([
+      AuthTerminalOperateScope,
+      AuthFilesystemReadScope,
+    ]);
+  });
   it("allows discovery and non-initializing reads without filesystem write access", () => {
     expect(clientRpcRequiredScopes(WS_METHODS.projectsMonolithDiscover, { cwd: "/repo" })).toEqual(
       [],

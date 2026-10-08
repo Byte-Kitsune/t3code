@@ -159,3 +159,38 @@ it.effect("stages bounded insight files inside the container and cleans them on 
     expect(docker.calls.at(-1)?.args.some((arg) => arg.includes("rmdir"))).toBe(true);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it.effect("uses ordered explicit split Compose files outside the PHP area", () =>
+  Effect.gen(function* () {
+    const root = yield* fixture;
+    const fs = yield* FileSystem.FileSystem;
+    yield* fs.makeDirectory(`${root}/infrastructure/docker`, { recursive: true });
+    yield* fs.writeFileString(`${root}/infrastructure/docker/base.yml`, "services: {}");
+    yield* fs.writeFileString(`${root}/infrastructure/docker/catalog.yml`, "services: {}");
+    const docker = mock(root);
+    const session = yield* Effect.flatMap(MagoDockerExecution.MagoDockerExecution, (service) =>
+      service.prepare({
+        workspaceRoot: root,
+        areaPath: "artifact/api",
+        runtime: {
+          service: "php-api",
+          composeFiles: ["infrastructure/docker/base.yml", "infrastructure/docker/catalog.yml"],
+        },
+      }),
+    ).pipe(Effect.provide(docker.layer));
+    yield* session.runMago(["analyze"]);
+    expect(session.composeArgs).toEqual([
+      "compose",
+      "--project-directory",
+      `${root}/infrastructure/docker`,
+      "-f",
+      `${root}/infrastructure/docker/base.yml`,
+      "-f",
+      `${root}/infrastructure/docker/catalog.yml`,
+    ]);
+    expect(docker.calls.at(-1)!.cwd).toBe(`${root}/infrastructure/docker`);
+    expect(docker.calls.at(-1)!.args.slice(0, session.composeArgs.length)).toEqual(
+      session.composeArgs,
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);

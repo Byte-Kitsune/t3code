@@ -273,10 +273,16 @@ The optional default base branch supplies the local Changes comparison target un
 another branch. A hosted pull request keeps its own target branch. Opening a saved PHP or React source file runs the locally installed analyzer and shows findings at
 source lines. PHP uses Mago format checks, analysis, and guard; React uses Biome checks. No formatting
 changes are applied. Errors and warnings stay visible inline; informational help opens from a compact
-icon. Expand **File checks** below the source for missing tools, setup details and execution status,
-The three **Mago checks**, **Doctrine queries**, and **Entry files and callers** sections above PHP
-source stay visible while loading and start collapsed. Expand each independently for results;
-setup messages stay in the footer.
+icon. Expand **File checks** below the source for missing tools, setup details and execution status.
+The **Mago checks** and **Entry files and callers** sections above PHP source stay visible while
+loading and start collapsed. Doctrine query estimates appear inline above each method; setup
+messages stay in the footer. Query colors use the Doctrine extension thresholds from
+`.mago/extension.php` when they can be read without executing PHP. The inline source hint shows
+the effective limits and their origin. In **Monolith areas**, enable **Override extension thresholds
+in T3** to set separate warning and error limits for an area, or leave it off to inherit the extension
+configuration. The upper bound determines the color; an unknown upper bound shows an
+incomplete-analysis warning. If extension thresholds cannot be resolved, the box explains this
+and does not classify the count using guessed limits.
 Install tools with your project's usual package manager before opening files. Existing analyzer
 configuration is used, including Mago installed in a PHP area's `tools/` Composer project.
 
@@ -285,8 +291,16 @@ for example `php` or `php-dev`. Mago checks and PHP insights then run in that ex
 Leave the service blank to use local execution. Start the service with your project's usual Compose
 workflow before opening files. Optional **Docker paths** can override the Compose folder relative
 to the repository root, the PHP area's absolute path in the container, and the Mago executable.
+For split Compose setups, configure an ordered list of repository-relative **Compose files**.
+A main file using `include` or `extends` works without a file list; for explicit merges, list the
+files in the same order as your usual `docker compose -f ...` command.
 Without overrides, T3 Code detects the nearest Compose project and bind mount, then looks for
 Mago in the area's Composer installation or on the container's executable path.
+
+The **Terminal** view offers configured Compose services beside the normal terminal. Choose a
+service from the scrollable tabs or selector; recently used services appear first. Toggle **Logs**
+to split the container shell and its live Compose logs. Services must already be running. Leaving
+the container view closes its owned shell and log stream while retaining the normal terminal.
 
 Docker choices are shared per area through `.t3/monolith.json`, for example:
 
@@ -312,6 +326,19 @@ The Mago workspace must match the PHP area's root; a different configured worksp
 explicit failure instead of inspecting or linking the wrong source tree.
 Query ranges describe one invocation; unresolved calls and recursion remain visible as unknown
 bounds. An injected service alone does not prove a method call.
+
+PHP comment hints require architecture graph **0.1.0-beta.17** or newer. By default, `[DEV COMMENT]`,
+`@deprecated`, `@todo` and `@see` attach metadata to declarations and resolved direct uses. Interface
+comments appear over implementing class names; interface-method comments appear over matching method
+signatures. Configure marker names and severities per PHP area, or disable them. Multiline text ends
+at an empty line, the next `@` tag or the comment end. Use a hint's source link to open its declaration.
+
+Opening a project indexes configured PHP and React areas in the background. File checks reuse local
+results only when the SHA-256 source hash and area dependencies still match. Branch switches, pulls,
+configuration changes and refreshed Symfony references invalidate affected results. Editor changes
+are saved after a short pause and checked after saving. The footer reports index progress and allows
+rebuilding; generated `.t3/monolith-index/` cache data should remain untracked. Project indexing is bounded to
+2,000 source files and 32 MiB per area; limits and unavailable tools are reported explicitly.
 
 In the file source view, **Ctrl-click** a PHP class or method name (**Cmd-click** on macOS) to
 inspect direct callers and entry call chains. Class selection groups its modeled methods. Select a

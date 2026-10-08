@@ -11,6 +11,7 @@ import {
   ProviderInstanceId,
   ServerSettingsError,
   TerminalProviderInstanceNotFoundError,
+  TerminalComposeError,
 } from "@t3tools/contracts";
 import { HostProcessPlatform, HostProcessArchitecture } from "@t3tools/shared/hostProcess";
 import * as Data from "effect/Data";
@@ -221,6 +222,9 @@ const multiTerminalHistoryLogPath = (
   );
 
 interface CreateManagerOptions {
+  resolveComposeLaunch?: Parameters<
+    typeof TerminalManager.makeWithOptions
+  >[0]["resolveComposeLaunch"];
   shellResolver?: () => string;
   env?: NodeJS.ProcessEnv;
   subprocessInspector?: (terminalPid: number) => Effect.Effect<{
@@ -271,6 +275,9 @@ const createManager = (
         logsDir,
         historyLineLimit,
         ptyAdapter,
+        ...(options.resolveComposeLaunch
+          ? { resolveComposeLaunch: options.resolveComposeLaunch }
+          : {}),
         ...(options.historyByteLimit !== undefined
           ? { historyByteLimit: options.historyByteLimit }
           : {}),
@@ -420,6 +427,86 @@ it.layer(
   Layer.merge(NodeServices.layer, ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer))),
   { excludeTestServices: true },
 )("TerminalManager", (it) => {
+  it.effect(
+    "runs configured Docker argv and releases its owned container shell when switching to normal",
+    () =>
+      Effect.gen(function* () {
+        const cleaned = yield* Ref.make(0);
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          resolveComposeLaunch: () =>
+            Effect.succeed({
+              shell: "docker",
+              args: ["compose", "exec", "php", "/bin/sh"],
+              cleanup: Ref.update(cleaned, (count) => count + 1),
+            }),
+        });
+        yield* manager.open({ ...openInput(), compose: { areaId: "catalog", mode: "shell" } });
+        expect(ptyAdapter.spawnInputs[0]?.shell).toBe("docker");
+        expect(ptyAdapter.spawnInputs[0]?.args).toEqual(["compose", "exec", "php", "/bin/sh"]);
+        yield* manager.open(openInput());
+        expect(yield* Ref.get(cleaned)).toBe(1);
+        expect(ptyAdapter.spawnInputs[1]?.shell).not.toBe("docker");
+        yield* manager.close({ threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID });
+        expect(yield* Ref.get(cleaned)).toBe(1);
+      }),
+  );
+
+  it.effect("keeps Docker log PTYs read-only and closes owned sessions after stream detach", () =>
+    Effect.gen(function* () {
+      const cleaned = yield* Ref.make(0);
+      const { manager, ptyAdapter } = yield* createManager(5, {
+        resolveComposeLaunch: () =>
+          Effect.succeed({
+            shell: "docker",
+            args: ["compose", "logs", "--follow", "php"],
+            cleanup: Ref.update(cleaned, (count) => count + 1),
+          }),
+      });
+      const detach = yield* manager.attachStream(
+        { ...openInput(), compose: { areaId: "catalog", mode: "logs" } },
+        () => Effect.void,
+      );
+      const result = yield* Effect.result(
+        manager.write({
+          threadId: "thread-1",
+          terminalId: DEFAULT_TERMINAL_ID,
+          data: "unsafe input",
+        }),
+      );
+      expect(result._tag).toBe("Failure");
+      expect(ptyAdapter.processes[0]?.writes).toEqual([]);
+      yield* Effect.sync(detach);
+      yield* waitFor(Ref.get(cleaned).pipe(Effect.map((count) => count === 1)));
+      const afterDetach = yield* Effect.result(
+        manager.observeStream(
+          { threadId: "thread-1", terminalId: DEFAULT_TERMINAL_ID },
+          () => Effect.void,
+        ),
+      );
+      expect(afterDetach._tag).toBe("Failure");
+    }),
+  );
+
+  it.effect("reports stopped Compose services without falling back to a host shell", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, getEvents } = yield* createManager(5, {
+        resolveComposeLaunch: () =>
+          Effect.fail(
+            new TerminalComposeError({ message: "Start the configured Docker Compose service." }),
+          ),
+      });
+      const snapshot = yield* manager.open({
+        ...openInput(),
+        compose: { areaId: "catalog", mode: "shell" },
+      });
+      expect(snapshot.status).toBe("error");
+      expect(ptyAdapter.spawnInputs).toEqual([]);
+      expect((yield* getEvents).find((event) => event.type === "error")).toMatchObject({
+        message: "Start the configured Docker Compose service.",
+      });
+    }),
+  );
+
   it.effect("spawns lazily and reuses running terminal per thread", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();

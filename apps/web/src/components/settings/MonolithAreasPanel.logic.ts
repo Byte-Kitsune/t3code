@@ -1,7 +1,32 @@
-import { MonolithMagoDocker, type MonolithArea, type MonolithConfig } from "@t3tools/contracts";
+import {
+  MonolithDoctrineQueryThresholds,
+  MonolithCommentMarkers,
+  MonolithMagoDocker,
+  type MonolithArea,
+  type MonolithConfig,
+} from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 const isMagoDocker = Schema.is(MonolithMagoDocker);
+const isQueryThresholds = Schema.is(MonolithDoctrineQueryThresholds);
+const isCommentMarkers = Schema.is(MonolithCommentMarkers);
+
+export const DEFAULT_COMMENT_MARKERS = [
+  { marker: "[DEV COMMENT]", severity: "info" },
+  { marker: "@deprecated", severity: "warning" },
+  { marker: "@todo", severity: "info" },
+  { marker: "@see", severity: "reference" },
+] as const;
+
+export function editMonolithDoctrineThresholdOverride(
+  area: MonolithArea,
+  enabled: boolean,
+): MonolithArea {
+  const { doctrineQueryThresholds, ...rest } = area;
+  return enabled
+    ? { ...rest, doctrineQueryThresholds: doctrineQueryThresholds ?? { warning: 10, error: 50 } }
+    : rest;
+}
 
 export interface MonolithAreaDraft {
   readonly baseline: MonolithConfig;
@@ -70,9 +95,12 @@ export function editMonolithMagoDocker(
 }
 
 export function normalizeMonolithMagoDocker(docker: MonolithMagoDocker): MonolithMagoDocker {
-  const { service, composeDirectory, containerPath, binary } = docker;
+  const { service, composeDirectory, composeFiles, containerPath, binary } = docker;
   return {
     service: service.trim(),
+    ...(composeFiles
+      ? { composeFiles: composeFiles.map((file) => normalizeMonolithAreaPath(file) ?? file.trim()) }
+      : {}),
     ...(composeDirectory
       ? { composeDirectory: normalizeMonolithAreaPath(composeDirectory) ?? composeDirectory.trim() }
       : {}),
@@ -96,6 +124,15 @@ export function validateMonolithAreas(areas: readonly MonolithArea[]): string | 
       return "An area can contain up to 100 entry folders.";
     if (area.magoDocker && !isMagoDocker(normalizeMonolithMagoDocker(area.magoDocker)))
       return "Docker Mago needs a valid Compose service name, a project-relative Compose folder and an absolute container folder. The binary must be a single POSIX executable path.";
+    if (area.doctrineQueryThresholds && !isQueryThresholds(area.doctrineQueryThresholds))
+      return "Query thresholds must be non-negative whole numbers, with warning below error.";
+    if (
+      area.commentMarkers &&
+      (!isCommentMarkers(area.commentMarkers) ||
+        new Set(area.commentMarkers.map((rule) => rule.marker.trim().toLowerCase())).size !==
+          area.commentMarkers.length)
+    )
+      return "Use up to 32 unique single-line comment markers (1–128 characters) and a valid level.";
     paths.add(path);
   }
   return null;

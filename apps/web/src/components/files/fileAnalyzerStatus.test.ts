@@ -23,6 +23,14 @@ const diagnostic = (
 });
 
 describe("fileCheckSummary", () => {
+  it.each(["unavailable", "unsupported", "failed"] as const)(
+    "keeps Doctrine %s setup failures discoverable in the file footer",
+    (status) => {
+      expect(
+        fileCheckSummary({ ...check, result: { ...result, queryBudget: { status, methods: [] } } }),
+      ).toBe(`Doctrine queries ${status}`);
+    },
+  );
   it("counts visible diagnostic severities rather than aggregated run findings", () => {
     expect(
       fileCheckSummary({

@@ -17,8 +17,10 @@ export interface AnalyzerExecutionInput {
   readonly cwd: string;
   readonly workspaceRoot: string;
   readonly filePath: string;
+  readonly filePaths?: readonly string[];
   readonly configPath?: string;
   readonly sourceText?: string;
+  readonly sourceTexts?: Readonly<Record<string, string>>;
   readonly runtime?: MonolithMagoDocker;
   readonly areaPath?: string;
 }
@@ -124,7 +126,8 @@ function relativeFile(
     return null;
   // PHP analysis and guard intentionally retain the complete project context, while
   // only diagnostics for the opened file are presented by this operation.
-  if (absolute !== paths.resolve(input.filePath)) return null;
+  if (!(input.filePaths ?? [input.filePath]).some((file) => absolute === paths.resolve(file)))
+    return null;
   return relative.split(paths.sep).join("/");
 }
 
@@ -219,9 +222,10 @@ function normalizeBiome(
     let end = location.end === undefined ? undefined : record(location.end);
     // Older Biome JSON reporters carry byte spans instead of source positions.
     if (start === undefined && Array.isArray(location.span)) {
-      if (input.sourceText === undefined) throw new Error("Source text is needed for byte spans");
-      start = bytePosition(input.sourceText, location.span[0]);
-      end = bytePosition(input.sourceText, location.span[1]);
+      const sourceText = input.sourceTexts?.[diagnosticPath] ?? input.sourceText;
+      if (sourceText === undefined) throw new Error("Source text is needed for byte spans");
+      start = bytePosition(sourceText, location.span[0]);
+      end = bytePosition(sourceText, location.span[1]);
     }
     const position = (value: unknown) => (value === 0 ? 1 : integer(value));
     diagnostics.push({
@@ -338,7 +342,7 @@ const make = Effect.gen(function* () {
               "--colors=off",
               "--max-diagnostics=none",
               ...(input.configPath ? [`--config-path=${input.configPath}`] : []),
-              input.filePath,
+              ...(input.filePaths ?? [input.filePath]),
             ]
           : [
               ...(input.configPath ? ["--config", toolPath(input.configPath)] : []),

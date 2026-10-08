@@ -1,3 +1,4 @@
+import * as MonolithIndexService from "./project/MonolithIndexService.ts";
 import * as SymfonyReferenceService from "./project/SymfonyReferenceService.ts";
 import * as MonolithAnalyzerService from "./project/MonolithAnalyzerService.ts";
 import * as AnalyzerDiscoveryService from "./project/AnalyzerDiscoveryService.ts";
@@ -63,6 +64,7 @@ import * as ForgejoCli from "./sourceControl/ForgejoCli.ts";
 import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceRegistryHydration.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as TerminalComposeLaunch from "./terminal/ComposeLaunch.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
@@ -391,6 +393,13 @@ const layerCheckpointStore = CheckpointStore.layer.pipe(Layer.provide(layerVcsDr
 const layerPortScanner = PortScanner.layer.pipe(Layer.provide(ProcessRunner.layer));
 
 const layerTerminal = TerminalManager.layer.pipe(
+  Layer.provide(
+    TerminalComposeLaunch.layer.pipe(
+      Layer.provide(MonolithService.layer),
+      Layer.provide(MagoDockerExecution.layer.pipe(Layer.provide(ProcessRunner.layer))),
+      Layer.provide(ProcessRunner.layer),
+    ),
+  ),
   Layer.provide(layerPtyAdapter),
   Layer.provide(layerPortScanner),
   Layer.provide(layerNativeTelemetry),
@@ -416,6 +425,23 @@ const layerWorkspaceFileSystem = WorkspaceFileSystem.layer.pipe(
 
 const layerMagoDocker = MagoDockerExecution.layer.pipe(Layer.provide(ProcessRunner.layer));
 
+const layerMonolithAnalyzers = MonolithAnalyzerService.layer.pipe(
+  Layer.provide(MonolithService.layer),
+  Layer.provide(AnalyzerDiscoveryService.layer),
+  Layer.provide(
+    AnalyzerExecution.layer.pipe(
+      Layer.provide(layerMagoDocker),
+      Layer.provide(ProcessRunner.layer),
+    ),
+  ),
+  Layer.provide(
+    PhpInsightsExecution.layer.pipe(
+      Layer.provide(layerMagoDocker),
+      Layer.provide(ProcessRunner.layer),
+    ),
+  ),
+);
+
 const layerWorkspace = Layer.mergeAll(
   MonolithService.layer,
   SymfonyReferenceService.layer.pipe(
@@ -424,21 +450,10 @@ const layerWorkspace = Layer.mergeAll(
     Layer.provide(AnalyzerDiscoveryService.layer),
     Layer.provide(ProcessRunner.layer),
   ),
-  MonolithAnalyzerService.layer.pipe(
+  layerMonolithAnalyzers,
+  MonolithIndexService.layer.pipe(
+    Layer.provide(layerMonolithAnalyzers),
     Layer.provide(MonolithService.layer),
-    Layer.provide(AnalyzerDiscoveryService.layer),
-    Layer.provide(
-      AnalyzerExecution.layer.pipe(
-        Layer.provide(layerMagoDocker),
-        Layer.provide(ProcessRunner.layer),
-      ),
-    ),
-    Layer.provide(
-      PhpInsightsExecution.layer.pipe(
-        Layer.provide(layerMagoDocker),
-        Layer.provide(ProcessRunner.layer),
-      ),
-    ),
   ),
   WorkspacePaths.layer,
   layerWorkspaceEntries,

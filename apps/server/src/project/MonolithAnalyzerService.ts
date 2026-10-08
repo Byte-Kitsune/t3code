@@ -43,11 +43,21 @@ export class MonolithAnalyzerService extends Context.Service<
     readonly discover: (input: {
       readonly cwd: string;
     }) => Effect.Effect<MonolithAnalyzersResult, MonolithAnalyzerError>;
+    readonly indexArea: (input: {
+      readonly cwd: string;
+      readonly areaId: string;
+      readonly paths: readonly string[];
+    }) => Effect.Effect<
+      readonly { readonly path: string; readonly result: MonolithCheckFileResult }[],
+      MonolithAnalyzerError
+    >;
     readonly checkFile: (
       input: MonolithCheckFileInput,
     ) => Effect.Effect<MonolithCheckFileResult, MonolithAnalyzerError>;
   }
 >()("t3/project/MonolithAnalyzerService") {}
+
+const isAnalyzerError = Schema.is(MonolithAnalyzerError);
 
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
@@ -88,6 +98,7 @@ const make = Effect.gen(function* () {
   });
   const checkFile = Effect.fn("MonolithAnalyzerService.checkFile")(function* (
     input: MonolithCheckFileInput,
+    indexPaths?: readonly string[],
   ) {
     const root = yield* fs
       .realPath(path.resolve(input.cwd))
@@ -143,6 +154,38 @@ const make = Effect.gen(function* () {
     const runs: MonolithAnalyzerRun[] = [];
     let insights: PhpInsightsExecution.PhpInsightsResult | undefined;
     const configuredArea = snapshot.config.areas.find((candidate) => candidate.id === area?.id);
+    const indexedSources = new Map<string, { contents: string; revision: string; file: string }>();
+    if (indexPaths !== undefined) {
+      if (
+        indexPaths.length > 2000 ||
+        new Set(indexPaths).size !== indexPaths.length ||
+        area === null ||
+        area.kind === "folder"
+      )
+        return yield* new MonolithAnalyzerError({ operation: "check", reason: "file_limit" });
+      let sourceBytes = 0;
+      for (const sourcePath of indexPaths) {
+        const sourceFile = path.resolve(root, sourcePath);
+        if (
+          matchMonolithArea({ path: sourcePath }, snapshot.config.areas)?.id !== area.id ||
+          path.relative(root, sourceFile).split(path.sep).join("/") !== sourcePath ||
+          (yield* fs.realPath(sourceFile)) !== sourceFile
+        )
+          return yield* new MonolithAnalyzerError({ operation: "check", reason: "unsafe_path" });
+        const sourceInfo = yield* fs.stat(sourceFile);
+        if (sourceInfo.type !== "File" || sourceInfo.size > 2 * 1024 * 1024)
+          return yield* new MonolithAnalyzerError({ operation: "check", reason: "file_limit" });
+        const sourceContents = yield* fs.readFileString(sourceFile);
+        sourceBytes += sourceContents.length;
+        if (sourceBytes > 32 * 1024 * 1024)
+          return yield* new MonolithAnalyzerError({ operation: "check", reason: "file_limit" });
+        indexedSources.set(sourcePath, {
+          file: sourceFile,
+          contents: sourceContents,
+          revision: yield* revision(sourceContents),
+        });
+      }
+    }
     if (area !== null && area.kind !== "folder") {
       const tool = area.kind === "php" ? "mago" : "biome";
       const applicable =
@@ -180,19 +223,57 @@ const make = Effect.gen(function* () {
             installation.scripts.find(
               (script) => script.operation === operation && script.configPath !== undefined,
             )?.configPath ?? installation.configPath;
-          const result = yield* execution
-            .run({
-              tool,
-              operation,
-              command: path.resolve(root, installation.binaryPath),
-              cwd: path.resolve(root, installation.workingDirectory),
-              workspaceRoot: root,
-              filePath: file,
-              sourceText: contents,
-              ...(runtime ? { runtime, areaPath: area.path } : {}),
-              ...(configPath === undefined ? {} : { configPath: path.resolve(root, configPath) }),
-            })
-            .pipe(Effect.result);
+          const execute = (
+            sourceFile = file,
+            sourceContents = contents,
+            batch = indexPaths !== undefined,
+          ) =>
+            execution
+              .run({
+                tool,
+                operation,
+                command: path.resolve(root, installation.binaryPath),
+                cwd: path.resolve(root, installation.workingDirectory),
+                workspaceRoot: root,
+                filePath: sourceFile,
+                sourceText: sourceContents,
+                ...(batch
+                  ? {
+                      filePaths: [...indexedSources.values()].map((source) => source.file),
+                      sourceTexts: Object.fromEntries(
+                        [...indexedSources].map(([sourcePath, source]) => [
+                          sourcePath,
+                          source.contents,
+                        ]),
+                      ),
+                    }
+                  : {}),
+                ...(runtime ? { runtime, areaPath: area.path } : {}),
+                ...(configPath === undefined ? {} : { configPath: path.resolve(root, configPath) }),
+              })
+              .pipe(Effect.result);
+          const results =
+            indexPaths !== undefined && operation === "format"
+              ? yield* Effect.forEach(
+                  [...indexedSources.values()],
+                  (source) => execute(source.file, source.contents, false),
+                  { concurrency: 2 },
+                )
+              : [yield* execute()];
+          const failed = results.find((result) => result._tag === "Failure");
+          const result = failed ?? {
+            _tag: "Success" as const,
+            success: {
+              diagnostics: results.flatMap((result) =>
+                result._tag === "Success" ? result.success.diagnostics : [],
+              ),
+              status: results.some(
+                (result) => result._tag === "Success" && result.success.status === "findings",
+              )
+                ? ("findings" as const)
+                : ("passed" as const),
+            },
+          };
           if (result._tag === "Failure") {
             runs.push({
               tool,
@@ -267,12 +348,16 @@ const make = Effect.gen(function* () {
                 areaPath: area.path,
                 filePath: file,
                 relativePath: input.path,
+                ...(indexPaths === undefined ? {} : { indexPaths }),
                 autoloadPaths,
                 ...(runtime ? { runtime } : {}),
                 ...(configPath ? { configPath: path.resolve(root, configPath) } : {}),
                 ...(reference && (runtime || reference.referenceAvailable)
                   ? { referencePath: path.resolve(root, reference.referencePath) }
                   : {}),
+                ...(configuredArea?.commentMarkers === undefined
+                  ? {}
+                  : { commentMarkers: configuredArea.commentMarkers }),
                 ...(snapshot.config.areas.find((candidate) => candidate.id === area.id)
                   ?.entrypointPaths
                   ? {
@@ -302,11 +387,38 @@ const make = Effect.gen(function* () {
         }
       }
     }
-    if ((yield* revision(yield* readFile)) !== fingerprint) {
+    let indexedSourceChanged = false;
+    for (const source of indexedSources.values())
+      if ((yield* revision(yield* fs.readFileString(source.file))) !== source.revision)
+        indexedSourceChanged = true;
+    if (indexedSourceChanged || (yield* revision(yield* readFile)) !== fingerprint) {
       return {
         areaId: area?.id ?? null,
         revision: fingerprint,
         diagnostics: [],
+        ...(indexPaths === undefined
+          ? {}
+          : {
+              indexedFiles: [...indexedSources].map(([sourcePath, source]) => ({
+                path: sourcePath,
+                result: {
+                  areaId: area?.id ?? null,
+                  revision: source.revision,
+                  diagnostics: [],
+                  runs: [],
+                  queryBudget: {
+                    status: "failed" as const,
+                    methods: [],
+                    message: "The source changed during indexing.",
+                  },
+                  entryChains: {
+                    status: "failed" as const,
+                    targets: [],
+                    message: "The source changed during indexing.",
+                  },
+                },
+              })),
+            }),
         runs: runs.map((run) => ({
           ...run,
           status: "failed" as const,
@@ -316,11 +428,97 @@ const make = Effect.gen(function* () {
         })),
       };
     }
-    return { areaId: area?.id ?? null, revision: fingerprint, diagnostics, runs, ...insights };
+    const thresholdFields =
+      configuredArea?.kind !== "php"
+        ? {}
+        : configuredArea.doctrineQueryThresholds !== undefined
+          ? {
+              doctrineQueryThresholds: configuredArea.doctrineQueryThresholds,
+              doctrineQueryThresholdsSource: { kind: "override" as const },
+            }
+          : {
+              ...(insights?.doctrineQueryThresholds === undefined
+                ? {}
+                : { doctrineQueryThresholds: insights.doctrineQueryThresholds }),
+              doctrineQueryThresholdsSource: insights?.doctrineQueryThresholdsSource ?? {
+                kind: "unresolved" as const,
+                message:
+                  "Query threshold configuration could not be inspected because PHP tooling is unavailable.",
+              },
+            };
+    return {
+      areaId: area?.id ?? null,
+      revision: fingerprint,
+      diagnostics,
+      runs,
+      ...(insights === undefined
+        ? {}
+        : { queryBudget: insights.queryBudget, entryChains: insights.entryChains }),
+      ...(indexPaths === undefined
+        ? {}
+        : {
+            indexedFiles: [...indexedSources].map(([sourcePath, source]) => {
+              const indexed = insights?.indexedFiles?.find((item) => item.path === sourcePath);
+              const fileDiagnostics = diagnostics.filter((item) => item.path === sourcePath);
+              return {
+                path: sourcePath,
+                result: {
+                  areaId: area?.id ?? null,
+                  revision: source.revision,
+                  diagnostics: fileDiagnostics,
+                  runs: runs.map((run) => ({
+                    ...run,
+                    diagnosticCount: fileDiagnostics.filter(
+                      (item) => item.operation === run.operation,
+                    ).length,
+                    status:
+                      run.status === "findings"
+                        ? fileDiagnostics.some((item) => item.operation === run.operation)
+                          ? ("findings" as const)
+                          : ("passed" as const)
+                        : run.status,
+                  })),
+                  ...(indexed
+                    ? { queryBudget: indexed.queryBudget, entryChains: indexed.entryChains }
+                    : insights
+                      ? { queryBudget: insights.queryBudget, entryChains: insights.entryChains }
+                      : {}),
+                  ...thresholdFields,
+                },
+              };
+            }),
+          }),
+      ...thresholdFields,
+    };
   });
   return MonolithAnalyzerService.of({
     discover,
-    checkFile: (input) => checks.withPermits(1)(checkFile(input)),
+    indexArea: (input) =>
+      checks.withPermits(1)(
+        Effect.gen(function* () {
+          if (input.paths.length === 0) return [];
+          const result = yield* checkFile({ cwd: input.cwd, path: input.paths[0]! }, input.paths);
+          if (result.areaId !== input.areaId || !("indexedFiles" in result))
+            return yield* new MonolithAnalyzerError({ operation: "check", reason: "unsafe_path" });
+          return result.indexedFiles!;
+        }).pipe(
+          Effect.mapError((cause) =>
+            isAnalyzerError(cause)
+              ? cause
+              : new MonolithAnalyzerError({ operation: "check", reason: "file", cause }),
+          ),
+        ),
+      ),
+    checkFile: (input) =>
+      checks
+        .withPermits(1)(checkFile(input))
+        .pipe(
+          Effect.mapError((cause) =>
+            isAnalyzerError(cause)
+              ? cause
+              : new MonolithAnalyzerError({ operation: "check", reason: "file", cause }),
+          ),
+        ),
   });
 });
 export const layer = Layer.effect(MonolithAnalyzerService, make);

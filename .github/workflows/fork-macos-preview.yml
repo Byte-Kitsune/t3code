@@ -1,0 +1,86 @@
+name: Fork macOS ARM64 preview
+
+on:
+  push:
+    tags:
+      - "v*-preview.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-macos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'Byte-Kitsune/t3code'
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      T3CODE_DESKTOP_UPDATE_REPOSITORY: Byte-Kitsune/t3code
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - name: Checkout tagged source
+        shell: bash
+        env:
+          BUILD_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin "$BUILD_REF"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git checkout --detach FETCH_HEAD
+      - name: Install workspace dependencies
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version: "24"
+          cache: true
+          run-install: |
+            vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+      - name: Build macOS ARM64 DMG and ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          version="${GITHUB_REF_NAME#v}"
+          node scripts/build-desktop-artifact.ts --platform mac --arch arm64 --target dmg --build-version "$version" --output-dir artifacts
+      - name: Verify packaged application and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip_path="$(find artifacts -maxdepth 1 -name '*arm64*.zip' -print -quit)"
+          test -n "$zip_path"
+          mkdir verify
+          ditto -x -k "$zip_path" verify
+          app_path="$(find verify -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$app_path"
+          test ! -e "$app_path/Contents/Resources/app-update.yml"
+          executable="$(find "$app_path/Contents/MacOS" -maxdepth 1 -type f -print -quit)"
+          ELECTRON_RUN_AS_NODE=1 "$executable" "$app_path/Contents/Resources/app.asar/apps/server/dist/bin.mjs" --help
+          cd artifacts
+          shasum -a 256 *.dmg *.zip > SHA256SUMS
+      - name: Retain build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-preview
+          path: artifacts/
+          if-no-files-found: ignore
+      - name: Publish fork preview release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'NOTES'
+          macOS Apple Silicon test build of the Byte-Kitsune fork.
+
+          Includes monolith areas, Docker Mago execution, PHP comment metadata, inline Doctrine query estimates, background indexing with source hashes, and container terminal/log views.
+
+          Download the ARM64 DMG or ZIP. This preview is not signed or notarized with an Apple Developer certificate. Managed Macs may prevent it from opening; follow your organization's software policy.
+
+          Preview builds have no automatic update feed and must be updated manually. They never fetch builds from pingdotgg/t3code. Shared project settings live in .t3/monolith.json; generated indexing cache remains local.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" artifacts/*.dmg artifacts/*.zip artifacts/SHA256SUMS --repo "$GITHUB_REPOSITORY" --title "Byte-Kitsune T3 Code ${GITHUB_REF_NAME#v} (macOS ARM64)" --notes-file release-notes.md --prerelease

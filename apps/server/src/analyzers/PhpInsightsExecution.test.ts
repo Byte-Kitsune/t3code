@@ -57,6 +57,9 @@ function mockRunner(
     changeConfig?: boolean;
     changeConfigDuringRead?: boolean;
     differentWorkspace?: boolean;
+    thresholdReport?: unknown;
+    expectedThresholdSource?: string;
+    expectedCommentMarkers?: readonly { marker: string; severity: string }[];
   } = {},
 ) {
   const calls: ProcessRunner.ProcessRunInput[] = [];
@@ -77,12 +80,34 @@ function mockRunner(
               ...(options.differentWorkspace ? { workspace: `${input.cwd}/nested` } : {}),
             },
             analyzer: { ignore: ["mixed-argument"] },
-            "extension-hosts": { original: { command: ["do-not-run"] } },
+            "extension-hosts": { original: { command: ["php", "tools/mago-worker.php"] } },
           }),
         );
       }
       temporaryInput = input.env?.T3_PHP_INSIGHTS_INPUT;
       const data = decode(yield* fs.readFileString(temporaryInput!)) as Record<string, string>;
+      if (options.expectedThresholdSource !== undefined) {
+        const sources = data.thresholdSources as unknown as readonly {
+          filePath: string;
+          relativePath: string;
+        }[];
+        expect(sources[0]?.relativePath).toBe(options.expectedThresholdSource);
+        expect(sources.some((source) => source.relativePath === "app/tools/mago-worker.php")).toBe(
+          true,
+        );
+      }
+      if (data.thresholdOutput)
+        yield* fs.writeFileString(
+          data.thresholdOutput,
+          encode(
+            options.thresholdReport ?? {
+              thresholds: { warning: 10, error: 50 },
+              source: { kind: "default" },
+            },
+          ),
+        );
+      if (options.expectedCommentMarkers !== undefined)
+        expect(data.commentMarkers).toEqual(options.expectedCommentMarkers);
       const config = decode(yield* fs.readFileString(input.args[1]!)) as {
         source: { paths: string[] };
         analyzer: { ignore: string[] };
@@ -112,6 +137,30 @@ function mockRunner(
               ],
             }),
       );
+      const indexed = data.indexPaths as unknown as readonly { relativePath: string }[] | null;
+      if (Array.isArray(indexed))
+        yield* fs.writeFileString(
+          data.queryOutput!,
+          encode({
+            files: indexed.map((file) => ({
+              path: file.relativePath,
+              report: {
+                status: "complete",
+                methods: [
+                  {
+                    symbol: "Test::load",
+                    path: file.relativePath,
+                    line: 1,
+                    lowerBound: 1,
+                    upperBound: 2,
+                    unknown: [],
+                    cycles: [],
+                  },
+                ],
+              },
+            })),
+          }),
+        );
       if (!options.missingGraph)
         yield* fs.writeFileString(
           data.graphOutput!,
@@ -232,6 +281,7 @@ it.effect.each(["missing", "stable", "changed"] as const)(
       const docker = MagoDockerExecution.MagoDockerExecution.of({
         prepare: () =>
           Effect.succeed({
+            composeArgs: ["compose"],
             hostAreaRoot: areaRoot,
             containerAreaRoot: "/srv/api",
             toContainer: (path) => path.replace(areaRoot, "/srv/api"),
@@ -345,5 +395,91 @@ it.effect.each(["missing", "stable", "changed"] as const)(
       expect(captured[1]).toContain("/tmp/t3-insights-fixture/mago.json");
       expect(captured[1]).toContain("/srv/api");
       expect(cleanup).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "forwards explicitly configured marker rules including disabled defaults to the worker",
+  () =>
+    Effect.gen(function* () {
+      const input = yield* setup;
+      for (const commentMarkers of [[], [{ marker: "[TEAM]", severity: "error" as const }]]) {
+        const mock = mockRunner({ expectedCommentMarkers: commentMarkers });
+        yield* Effect.flatMap(PhpInsightsExecution.PhpInsightsExecution, (service) =>
+          service.run({ ...input, commentMarkers }),
+        ).pipe(Effect.provide(runLayer(mock.run)));
+      }
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("builds indexed per-file reports from one shared PHP source analysis", () =>
+  Effect.gen(function* () {
+    const input = yield* setup;
+    const fs = yield* FileSystem.FileSystem;
+    yield* fs.writeFileString(`${input.workspaceRoot}/app/src/Other.php`, "<?php class Other {}");
+    const mock = mockRunner();
+    const result = yield* Effect.flatMap(PhpInsightsExecution.PhpInsightsExecution, (service) =>
+      service.run({ ...input, indexPaths: ["app/src/Test.php", "app/src/Other.php"] }),
+    ).pipe(Effect.provide(runLayer(mock.run)));
+    expect(mock.calls).toHaveLength(2);
+    expect(
+      result.indexedFiles?.map((file) => [
+        file.path,
+        file.queryBudget.methods[0]?.upperBound,
+        file.entryChains.status,
+      ]),
+    ).toEqual([
+      ["app/src/Test.php", 2, "unavailable"],
+      ["app/src/Other.php", 2, "unavailable"],
+    ]);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "reads canonical threshold provenance and preserves unresolved configuration without guesses",
+  () =>
+    Effect.gen(function* () {
+      const input = yield* setup;
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.makeDirectory(`${input.workspaceRoot}/app/.mago`);
+      yield* fs.writeFileString(
+        `${input.workspaceRoot}/app/.mago/extension.php`,
+        "<?php return Budget::create(warningThreshold:12,errorThreshold:40);",
+      );
+      const thresholdReport = {
+        thresholds: { warning: 12, error: 40 },
+        source: { kind: "extension", path: "app/.mago/extension.php" },
+      };
+      const result = yield* Effect.flatMap(PhpInsightsExecution.PhpInsightsExecution, (service) =>
+        service.run(input),
+      ).pipe(
+        Effect.provide(
+          runLayer(
+            mockRunner({ thresholdReport, expectedThresholdSource: "app/.mago/extension.php" }).run,
+          ),
+        ),
+      );
+      expect(result.doctrineQueryThresholds).toEqual({ warning: 12, error: 40 });
+      expect(result.doctrineQueryThresholdsSource).toEqual(thresholdReport.source);
+      const unresolved = yield* Effect.flatMap(
+        PhpInsightsExecution.PhpInsightsExecution,
+        (service) => service.run(input),
+      ).pipe(
+        Effect.provide(
+          runLayer(
+            mockRunner({
+              thresholdReport: {
+                source: {
+                  kind: "unresolved",
+                  path: "app/.mago/extension.php",
+                  message: "Dynamic thresholds",
+                },
+              },
+            }).run,
+          ),
+        ),
+      );
+      expect(unresolved.doctrineQueryThresholds).toBeUndefined();
+      expect(unresolved.doctrineQueryThresholdsSource?.kind).toBe("unresolved");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

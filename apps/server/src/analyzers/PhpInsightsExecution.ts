@@ -2,6 +2,9 @@ import type {
   MonolithEntryChains,
   MonolithQueryBudget,
   MonolithMagoDocker,
+  MonolithCommentMarker,
+  MonolithDoctrineQueryThresholds,
+  MonolithDoctrineQueryThresholdsSource,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -12,8 +15,9 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as MagoDockerExecution from "./MagoDockerExecution.ts";
 import * as ProcessRunner from "../processRunner.ts";
-import { decodePhpQueryInsights } from "./PhpQueryInsights.ts";
+import { decodePhpQueryInsights, normalizePhpQueryInsights } from "./PhpQueryInsights.ts";
 import { normalizePhpEntryInsightsReport } from "./PhpEntryInsights.ts";
+import { normalizePhpThresholdInsights } from "./PhpThresholdInsights.ts";
 import { PHP_INSIGHTS_WORKER_SOURCE } from "./PhpInsightsWorkerSource.ts";
 
 const isDockerError = Schema.is(MagoDockerExecution.MagoDockerError);
@@ -25,15 +29,24 @@ export interface PhpInsightsInput {
   readonly areaPath: string;
   readonly filePath: string;
   readonly relativePath: string;
+  readonly indexPaths?: readonly string[];
   readonly configPath?: string;
   readonly autoloadPaths: readonly string[];
   readonly referencePath?: string;
   readonly entrypointPaths?: readonly string[];
+  readonly commentMarkers?: readonly MonolithCommentMarker[];
   readonly runtime?: MonolithMagoDocker;
 }
 export interface PhpInsightsResult {
+  readonly doctrineQueryThresholds?: MonolithDoctrineQueryThresholds;
+  readonly doctrineQueryThresholdsSource?: MonolithDoctrineQueryThresholdsSource;
   readonly queryBudget: MonolithQueryBudget;
   readonly entryChains: MonolithEntryChains;
+  readonly indexedFiles?: readonly {
+    readonly path: string;
+    readonly queryBudget: MonolithQueryBudget;
+    readonly entryChains: MonolithEntryChains;
+  }[];
 }
 export class PhpInsightsExecutionError extends Schema.TaggedError<PhpInsightsExecutionError>()(
   "PhpInsightsExecutionError",
@@ -265,16 +278,57 @@ const make = Effect.gen(function* () {
           dockerTemp ? `${temp}/${name}` : paths.join(temp, name);
         const queryOutput = tempPath("queries.json");
         const graphOutput = tempPath("graph.json");
+        const thresholdOutput = tempPath("thresholds.json");
         const configPath = tempPath("mago.json");
         const worker = tempPath("worker.php");
         const inputPath = tempPath("input.json");
         const policyPath = paths.join(areaRoot, ".mago", "architecture-policy.json");
         const hasPolicy = yield* fs.exists(policyPath);
         if (hasPolicy) yield* safe(policyPath);
+        const thresholdCandidates = [paths.join(areaRoot, ".mago", "extension.php")];
+        const originalHosts = effective["extension-hosts"];
+        if (
+          originalHosts !== null &&
+          typeof originalHosts === "object" &&
+          !Array.isArray(originalHosts)
+        ) {
+          for (const host of Object.values(originalHosts)) {
+            if (
+              host === null ||
+              typeof host !== "object" ||
+              !("command" in host) ||
+              !Array.isArray(host.command)
+            )
+              continue;
+            for (const argument of host.command) {
+              if (typeof argument !== "string" || !argument.endsWith(".php")) continue;
+              let candidate: string;
+              try {
+                candidate =
+                  docker && argument.startsWith("/")
+                    ? docker.toHost(argument)
+                    : paths.resolve(areaRoot, argument);
+              } catch {
+                continue;
+              }
+              if (within(candidate, areaRoot)) thresholdCandidates.push(candidate);
+            }
+          }
+        }
+        thresholdCandidates.push(paths.join(areaRoot, "tools", "mago-worker.php"));
+        const thresholdSources = [...new Set(thresholdCandidates)].slice(0, 16);
+        const thresholdHostSources: string[] = [];
+        for (const candidate of thresholdSources)
+          if (yield* fs.exists(candidate)) {
+            yield* safe(candidate);
+            const info = yield* fs.stat(candidate);
+            if (info.type === "File" && info.size <= 1048576) thresholdHostSources.push(candidate);
+          }
         const trackedPaths = [
           ...(input.configPath ? [input.configPath] : []),
           ...(referenceOnHost ? [referencePath!] : []),
           ...(hasPolicy ? [policyPath] : []),
+          ...thresholdHostSources,
         ];
         const tracked = yield* Effect.forEach(trackedPaths, (file) => fs.readFileString(file));
         // Keep the configuration from before Mago read it, so a concurrent edit
@@ -290,8 +344,22 @@ const make = Effect.gen(function* () {
           autoloadPaths: input.autoloadPaths.map(toolPath),
           queryOutput,
           graphOutput,
+          thresholdOutput,
+          thresholdSources: thresholdSources.map((filePath) => ({
+            filePath: toolPath(filePath),
+            relativePath: paths.relative(input.workspaceRoot, filePath).split(paths.sep).join("/"),
+          })),
           architecturePolicyPath: hasPolicy ? toolPath(policyPath) : null,
           entrypointPaths: input.entrypointPaths ?? ["src/Controller", "src/Command"],
+          commentMarkers: input.commentMarkers ?? null,
+          indexPaths:
+            input.indexPaths?.map((file) => ({
+              relativePath: file,
+              areaRelativePath: paths
+                .relative(areaRoot, paths.resolve(input.workspaceRoot, file))
+                .split(paths.sep)
+                .join("/"),
+            })) ?? null,
         };
         // Keep the effective project snapshot and replace workers only for this
         // read-only run. Existing commands may mutate state or hide entire graphs.
@@ -375,7 +443,74 @@ const make = Effect.gen(function* () {
           ),
           Effect.result,
         );
+        const thresholds = yield* sidecar(thresholdOutput).pipe(
+          Effect.flatMap(decodeJson),
+          Effect.flatMap((value) => Effect.try(() => normalizePhpThresholdInsights(value))),
+          Effect.result,
+        );
+        const thresholdFields =
+          thresholds._tag === "Success"
+            ? thresholds.success
+            : {
+                doctrineQueryThresholdsSource: {
+                  kind: "unresolved" as const,
+                  message:
+                    "Configured query thresholds could not be read safely. Refresh the installed Doctrine extension.",
+                },
+              };
+        let indexedFiles: PhpInsightsResult["indexedFiles"];
+        if (input.indexPaths !== undefined) {
+          const queryReport = yield* sidecar(queryOutput).pipe(
+            Effect.flatMap(decodeJson),
+            Effect.result,
+          );
+          const graphReport = yield* sidecar(graphOutput).pipe(
+            Effect.flatMap(decodeJson),
+            Effect.result,
+          );
+          indexedFiles = input.indexPaths.map((file) => {
+            const pathInArea = paths
+              .relative(areaRoot, paths.resolve(input.workspaceRoot, file))
+              .split(paths.sep)
+              .join("/");
+            let queryBudget: MonolithQueryBudget = {
+              status: "failed",
+              message: "The indexed query report is missing or invalid.",
+              methods: [],
+            };
+            let entryChains: MonolithEntryChains = {
+              status: "failed",
+              message: "The indexed entry report is missing or invalid.",
+              targets: [],
+            };
+            try {
+              if (queryReport._tag === "Success") {
+                const indexed = object(queryReport.success).files;
+                if (!Array.isArray(indexed) || indexed.length > 2000)
+                  throw new Error("Invalid indexed query report.");
+                const item = indexed.find((value) => object(value).path === file);
+                if (item !== undefined)
+                  queryBudget = normalizePhpQueryInsights(object(item).report, file);
+              }
+            } catch {
+              /* Keep a failed query result independently from the graph. */
+            }
+            try {
+              if (graphReport._tag === "Success")
+                entryChains = normalizePhpEntryInsightsReport(
+                  graphReport.success,
+                  pathInArea,
+                  input.areaPath,
+                );
+            } catch {
+              /* Keep a failed graph result independently from queries. */
+            }
+            return { path: file, queryBudget, entryChains };
+          });
+        }
         return {
+          ...thresholdFields,
+          ...(indexedFiles === undefined ? {} : { indexedFiles }),
           queryBudget:
             query._tag === "Success"
               ? query.success

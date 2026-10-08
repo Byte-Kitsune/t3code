@@ -1,3 +1,5 @@
+import type { PhpQueryAnnotation } from "./phpQueryAnnotations";
+import type { PhpCommentAnnotation } from "./phpCommentAnnotations";
 import { sha256 } from "@noble/hashes/sha2";
 import type { MonolithAnalyzerDiagnostic } from "@t3tools/contracts";
 import type { LineAnnotation } from "@pierre/diffs";
@@ -31,11 +33,15 @@ export function fileAnalyzerDiagnostics(
 
 export interface FileAnalyzerAnnotationGroup extends FileCommentAnnotationGroup {
   diagnostics?: readonly MonolithAnalyzerDiagnostic[];
+  queries?: readonly PhpQueryAnnotation[];
+  devComments?: readonly PhpCommentAnnotation[];
 }
 
 export function mergeFileAnalyzerAnnotations(
   comments: readonly FileCommentLineAnnotation[],
   diagnostics: readonly MonolithAnalyzerDiagnostic[],
+  queries: readonly PhpQueryAnnotation[] = [],
+  devComments: readonly PhpCommentAnnotation[] = [],
 ): LineAnnotation<FileAnalyzerAnnotationGroup>[] {
   const byLine = new Map<number, LineAnnotation<FileAnalyzerAnnotationGroup>>();
   for (const comment of comments) byLine.set(comment.lineNumber, { ...comment });
@@ -44,8 +50,31 @@ export function mergeFileAnalyzerAnnotations(
     byLine.set(diagnostic.line, {
       lineNumber: diagnostic.line,
       metadata: {
+        ...current?.metadata,
         entries: current?.metadata.entries ?? [],
         diagnostics: [...(current?.metadata.diagnostics ?? []), diagnostic],
+      },
+    });
+  }
+  for (const query of queries) {
+    const current = byLine.get(query.lineNumber);
+    byLine.set(query.lineNumber, {
+      lineNumber: query.lineNumber,
+      metadata: {
+        ...current?.metadata,
+        entries: current?.metadata.entries ?? [],
+        queries: [...(current?.metadata.queries ?? []), query],
+      },
+    });
+  }
+  for (const comment of devComments) {
+    const current = byLine.get(comment.lineNumber);
+    byLine.set(comment.lineNumber, {
+      lineNumber: comment.lineNumber,
+      metadata: {
+        ...current?.metadata,
+        entries: current?.metadata.entries ?? [],
+        devComments: [...(current?.metadata.devComments ?? []), comment],
       },
     });
   }

@@ -6,6 +6,20 @@ const decodeResult = Schema.decodeSync(MonolithCheckFileResult);
 const decodeArea = Schema.decodeUnknownSync(MonolithArea);
 
 describe("shared PHP insights contracts", () => {
+  it("round-trips per-area query thresholds and rejects unordered or fractional boundaries", () => {
+    const area = { id: "api", name: "API", path: "artifact/api", kind: "php" };
+    expect(
+      decodeArea({ ...area, doctrineQueryThresholds: { warning: 5, error: 20 } })
+        .doctrineQueryThresholds,
+    ).toEqual({ warning: 5, error: 20 });
+    for (const doctrineQueryThresholds of [
+      { warning: -1, error: 50 },
+      { warning: 10.5, error: 50 },
+      { warning: 50, error: 50 },
+      { warning: 60, error: 50 },
+    ])
+      expect(() => decodeArea({ ...area, doctrineQueryThresholds })).toThrow();
+  });
   it("keeps unknown query upper bounds and incomplete call chains across transport", () => {
     const result = decodeResult({
       areaId: "api",

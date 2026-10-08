@@ -51,6 +51,142 @@ function graph(options: { complete?: boolean; depth?: number; unknown?: string[]
   };
 }
 describe("full PHP entry call graph", () => {
+  it("keeps declaration comments, exact opened-file spans and referenced chain metadata", () => {
+    const report = graph();
+    const annotation = {
+      marker: "@deprecated",
+      severity: "warning",
+      message: "Use ModernRepository",
+      path: "src/Repository.php",
+      line: 2,
+      column: 5,
+    };
+    Object.assign(report.snapshot, {
+      symbol_metadata: [
+        {
+          symbol: "App\\Repository",
+          kind: "class",
+          path: "src/Repository.php",
+          line: 3,
+          column: 7,
+          annotations: [annotation],
+        },
+        {
+          symbol: "App\\Service::fetch",
+          kind: "method",
+          path: "src/Service.php",
+          line: 12,
+          column: 5,
+          annotations: [
+            {
+              ...annotation,
+              marker: "@see",
+              severity: "reference",
+              message: "App\\Repository::find",
+              path: "src/Service.php",
+            },
+          ],
+        },
+        {
+          symbol: "App\\Unused",
+          kind: "class",
+          path: "src/Unused.php",
+          line: 4,
+          column: 5,
+          annotations: [annotation],
+        },
+      ],
+      annotation_sites: [
+        {
+          symbol: "App\\Repository::find",
+          target_symbol: "App\\Repository",
+          kind: "declaration",
+          path: "src/Repository.php",
+          line: 5,
+          column: 5,
+          end_line: 5,
+          end_column: 9,
+          annotations: [annotation],
+        },
+        {
+          symbol: "App\\Service::fetch",
+          target_symbol: "App\\Repository::find",
+          kind: "call",
+          path: "src/Service.php",
+          line: 16,
+          column: 9,
+          end_line: 16,
+          end_column: 13,
+          annotations: [annotation],
+        },
+      ],
+    });
+    const result = normalizePhpEntryInsightsReport(report, "src/Repository.php", "artifact/api");
+    expect(result.symbolMetadata?.map((item) => item.symbol)).toEqual([
+      "App\\Repository",
+      "App\\Service::fetch",
+    ]);
+    expect(result.annotationSites).toHaveLength(1);
+    expect(result.annotationSites?.[0]).toMatchObject({
+      path: "artifact/api/src/Repository.php",
+      targetSymbol: "App\\Repository",
+      endColumn: 9,
+    });
+    expect(result.symbolMetadata?.[1]?.annotations[0]).toMatchObject({
+      severity: "reference",
+      message: "App\\Repository::find",
+      path: "artifact/api/src/Service.php",
+    });
+  });
+  it("returns comments on an opened interface without graph methods", () => {
+    const report = graph();
+    Object.assign(report.snapshot, {
+      symbol_metadata: [
+        {
+          symbol: "App\\Contract",
+          kind: "interface",
+          path: "src/Contract.php",
+          line: 3,
+          column: 11,
+          annotations: [],
+        },
+      ],
+      annotation_sites: [],
+    });
+    const result = normalizePhpEntryInsightsReport(report, "src/Contract.php");
+    expect(result.status).toBe("complete");
+    expect(result.targets).toEqual([]);
+    expect(result.symbolMetadata?.[0]?.kind).toBe("interface");
+  });
+  it.each(["path", "severity", "span", "count"])("rejects invalid annotation %s", (caseName) => {
+    const report = graph();
+    const annotation = {
+      marker: "@todo",
+      severity: "info",
+      message: "",
+      path: "src/Repository.php",
+      line: 2,
+      column: 5,
+    };
+    const site = {
+      symbol: "App\\Repository::find",
+      target_symbol: "App\\Repository",
+      kind: "declaration",
+      path: "src/Repository.php",
+      line: 5,
+      column: 5,
+      end_line: 5,
+      end_column: 9,
+      annotations: [annotation],
+    };
+    if (caseName === "path") annotation.path = "../outside.php";
+    if (caseName === "severity") annotation.severity = "critical";
+    if (caseName === "span") site.end_column = 4;
+    if (caseName === "count") site.annotations = Array.from({ length: 129 }, () => annotation);
+    Object.assign(report.snapshot, { annotation_sites: [site] });
+    expect(() => normalizePhpEntryInsightsReport(report, "src/Repository.php")).toThrow();
+  });
+
   it("returns actual direct callers and transitive entries, not injection-only consumers", () => {
     const result = normalizePhpEntryInsightsReport(
       graph(),

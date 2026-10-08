@@ -1,5 +1,8 @@
 import { MonolithGenerateReferencesInput, MonolithGenerateReferencesResult } from "./monolith.ts";
 import {
+  MonolithIndexInput,
+  MonolithIndexStatusInput,
+  MonolithIndexStatus,
   MonolithCheckFileInput,
   MonolithCheckFileResult,
   MonolithAnalyzersResult,
@@ -376,6 +379,8 @@ export const WS_METHODS = {
   projectsMonolithDiscover: "projects.monolith.discover",
   projectsMonolithSave: "projects.monolith.save",
   projectsMonolithAnalyzers: "projects.monolith.analyzers",
+  projectsMonolithIndex: "projects.monolith.index",
+  projectsMonolithIndexStatus: "projects.monolith.indexStatus",
   projectsMonolithCheckFile: "projects.monolith.checkFile",
   projectsMonolithGenerateReferences: "projects.monolith.generateReferences",
   projectsReadFile: "projects.readFile",
@@ -1181,6 +1186,16 @@ const WsProjectsMonolithAnalyzersRpc = Rpc.make(WS_METHODS.projectsMonolithAnaly
   success: MonolithAnalyzersResult,
   error: Schema.Union([MonolithAnalyzerRequestError, EnvironmentAuthorizationError]),
 });
+const WsProjectsMonolithIndexRpc = Rpc.make(WS_METHODS.projectsMonolithIndex, {
+  payload: MonolithIndexInput,
+  success: MonolithIndexStatus,
+  error: Schema.Union([MonolithAnalyzerRequestError, EnvironmentAuthorizationError]),
+});
+const WsProjectsMonolithIndexStatusRpc = Rpc.make(WS_METHODS.projectsMonolithIndexStatus, {
+  payload: MonolithIndexStatusInput,
+  success: MonolithIndexStatus,
+  error: Schema.Union([MonolithAnalyzerRequestError, EnvironmentAuthorizationError]),
+});
 const WsProjectsMonolithCheckFileRpc = Rpc.make(WS_METHODS.projectsMonolithCheckFile, {
   payload: MonolithCheckFileInput,
   success: MonolithCheckFileResult,
@@ -1945,6 +1960,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsMonolithDiscoverRpc,
   WsProjectsMonolithSaveRpc,
   WsProjectsMonolithAnalyzersRpc,
+  WsProjectsMonolithIndexRpc,
+  WsProjectsMonolithIndexStatusRpc,
   WsProjectsMonolithCheckFileRpc,
   WsProjectsMonolithGenerateReferencesRpc,
   WsProjectsListEntriesRpc,

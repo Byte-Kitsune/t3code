@@ -304,6 +304,7 @@ it.effect(
         prepare: (request) => {
           expect(request.areaPath).toBe("app");
           return Effect.succeed({
+            composeArgs: ["compose"],
             hostAreaRoot: "/repo/app",
             containerAreaRoot: "/srv/api",
             toContainer: (path) => path.replace("/repo/app", "/srv/api"),

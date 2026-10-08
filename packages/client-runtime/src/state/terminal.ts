@@ -55,6 +55,16 @@ export function createTerminalEnvironmentAtoms<R, E>(
           ),
         ),
     }),
+    attachEphemeral: createEnvironmentSubscriptionAtomFamily(runtime, {
+      label: "environment-data:terminal:attach-ephemeral",
+      idleTtlMs: 0,
+      subscribe: (input: EnvironmentRpcInput<typeof WS_METHODS.terminalAttach>) =>
+        Stream.suspend(() =>
+          subscribe(WS_METHODS.terminalAttach, input).pipe(
+            Stream.scan(nextTerminalAttachSeedState, applyTerminalAttachStreamEvent),
+          ),
+        ),
+    }),
     events: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:terminal:events",
       tag: WS_METHODS.subscribeTerminalEvents,

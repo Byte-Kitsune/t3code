@@ -1,3 +1,9 @@
+import type {
+  MonolithSourceAnnotation,
+  MonolithSymbolMetadata,
+  MonolithAnnotationSite,
+} from "@t3tools/contracts";
+
 /** Full source graphs come from the architecture extension, never policy findings. */
 interface GraphNode {
   readonly id: string;
@@ -40,6 +46,9 @@ export interface PhpEntryInsights {
   readonly status: "complete" | "incomplete" | "unavailable" | "unsupported" | "failed";
   readonly message?: string;
   readonly targets: readonly PhpEntryTarget[];
+  readonly symbolMetadata?: readonly MonolithSymbolMetadata[];
+  readonly commentColumnEncoding?: "utf8_bytes";
+  readonly annotationSites?: readonly MonolithAnnotationSite[];
 }
 function object(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value))
@@ -80,6 +89,84 @@ function list(value: unknown, max: number): readonly unknown[] {
   return value;
 }
 
+function annotations(value: unknown, prefix: string): readonly MonolithSourceAnnotation[] {
+  return list(value, 128).map((item) => {
+    const annotation = object(item);
+    if (!["info", "warning", "error", "reference"].includes(String(annotation.severity)))
+      throw new Error("Invalid annotation severity.");
+    // Empty @see or marker text is valid evidence, but oversized/control text is not.
+    if (
+      typeof annotation.message !== "string" ||
+      annotation.message.length > 4096 ||
+      /\0/.test(annotation.message)
+    )
+      throw new Error("Invalid annotation message.");
+    return {
+      marker: text(annotation.marker, 128),
+      severity: annotation.severity as MonolithSourceAnnotation["severity"],
+      message: annotation.message,
+      path: `${prefix}${relativePath(annotation.path)}`,
+      line: position(annotation.line),
+      column: position(annotation.column),
+    };
+  });
+}
+
+function metadata(snapshot: Record<string, unknown>, prefix: string) {
+  const symbols: MonolithSymbolMetadata[] | undefined =
+    snapshot.symbol_metadata === undefined
+      ? undefined
+      : list(snapshot.symbol_metadata, 50_000).map((item) => {
+          const symbol = object(item);
+          if (!["class", "interface", "trait", "enum", "method"].includes(String(symbol.kind)))
+            throw new Error("Invalid annotation declaration kind.");
+          return {
+            symbol: text(symbol.symbol),
+            kind: symbol.kind as MonolithSymbolMetadata["kind"],
+            path: `${prefix}${relativePath(symbol.path)}`,
+            line: position(symbol.line),
+            column: position(symbol.column),
+            annotations: annotations(symbol.annotations, prefix),
+          };
+        });
+  const sites: MonolithAnnotationSite[] | undefined =
+    snapshot.annotation_sites === undefined
+      ? undefined
+      : list(snapshot.annotation_sites, 250_000).map((item) => {
+          const site = object(item);
+          if (
+            ![
+              "declaration",
+              "implementation",
+              "call",
+              "new",
+              "extends",
+              "implements",
+              "type",
+            ].includes(String(site.kind))
+          )
+            throw new Error("Invalid annotation site kind.");
+          const line = position(site.line);
+          const column = position(site.column);
+          const endLine = position(site.end_line);
+          const endColumn = position(site.end_column);
+          if (endLine < line || (endLine === line && endColumn <= column))
+            throw new Error("Invalid annotation source span.");
+          return {
+            symbol: text(site.symbol),
+            targetSymbol: text(site.target_symbol),
+            kind: site.kind as MonolithAnnotationSite["kind"],
+            path: `${prefix}${relativePath(site.path)}`,
+            line,
+            column,
+            endLine,
+            endColumn,
+            annotations: annotations(site.annotations, prefix),
+          };
+        });
+  return { symbols, sites };
+}
+
 /** One deterministic shortest chain per configured entry and target service variant. */
 export function normalizePhpEntryInsightsReport(
   value: unknown,
@@ -108,6 +195,12 @@ export function normalizePhpEntryInsightsReport(
   relativePath(openedAreaRelativePath);
   const prefix =
     areaRepoPrefix === "" || areaRepoPrefix === "." ? "" : `${relativePath(areaRepoPrefix)}/`;
+  if (
+    snapshot.comment_column_encoding !== undefined &&
+    snapshot.comment_column_encoding !== "utf8_bytes"
+  )
+    throw new Error("Unsupported annotation column encoding.");
+  const annotationMetadata = metadata(snapshot, prefix);
   const nodes = new Map<string, GraphNode>();
   for (const value of list(snapshot.nodes, 50_000)) {
     const node = object(value);
@@ -149,7 +242,10 @@ export function normalizePhpEntryInsightsReport(
   const selected = [...nodes.values()]
     .filter((node) => node.path === openedAreaRelativePath)
     .sort((a, b) => a.line - b.line || a.id.localeCompare(b.id));
-  if (selected.length === 0)
+  const openedPath = `${prefix}${openedAreaRelativePath}`;
+  const openedMetadata = annotationMetadata.symbols?.filter((item) => item.path === openedPath);
+  const openedSites = annotationMetadata.sites?.filter((item) => item.path === openedPath);
+  if (selected.length === 0 && !openedMetadata?.length && !openedSites?.length)
     return {
       status: "unavailable",
       message: "The opened file has no uniquely modeled method in the source graph.",
@@ -224,10 +320,33 @@ export function normalizePhpEntryInsightsReport(
       truncated,
     });
   }
-  const complete = snapshot.complete && targets.every((target) => !target.truncated);
+  const referencedSymbols = new Set(
+    targets.flatMap((target) => [
+      target.symbol,
+      ...target.directCallers.map((caller) => caller.symbol),
+      ...target.entries.flatMap((entry) => entry.chain.map((node) => node.symbol)),
+    ]),
+  );
+  // Class-level comments also accompany returned methods on the graph.
+  for (const symbol of referencedSymbols) {
+    const separator = symbol.lastIndexOf("::");
+    if (separator > 0) referencedSymbols.add(symbol.slice(0, separator));
+  }
+  const selectedMetadata = annotationMetadata.symbols?.filter(
+    (item) => item.path === openedPath || referencedSymbols.has(item.symbol),
+  );
+  const annotationsTruncated =
+    (selectedMetadata?.length ?? 0) > 4096 || (openedSites?.length ?? 0) > 4096;
+  const complete =
+    snapshot.complete && !annotationsTruncated && targets.every((target) => !target.truncated);
   return {
     status: complete ? "complete" : "incomplete",
     targets,
+    ...(snapshot.comment_column_encoding === undefined
+      ? {}
+      : { commentColumnEncoding: "utf8_bytes" as const }),
+    ...(selectedMetadata === undefined ? {} : { symbolMetadata: selectedMetadata.slice(0, 4096) }),
+    ...(openedSites === undefined ? {} : { annotationSites: openedSites.slice(0, 4096) }),
     message:
       "One shortest call chain per configured entry and method/service variant; entry scopes are static configuration, not proof of a runtime request.",
   };

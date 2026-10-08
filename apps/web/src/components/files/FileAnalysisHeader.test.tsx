@@ -37,15 +37,15 @@ describe("FileAnalysisHeader", () => {
       },
     },
   ])(
-    "keeps three stable collapsed rows before and after analysis without mounting details",
+    "keeps two stable collapsed rows before and after analysis without mounting details",
     (check) => {
       const html = renderToStaticMarkup(
         <FileAnalysisHeader check={check} onOpenFile={() => {}} loading={check.result === null} />,
       );
       expect(
         [...html.matchAll(/<summary[^>]*>(.*?)<\/summary>/g)].map((match) => match[1]),
-      ).toEqual(["Mago checks", "Doctrine queries", "Entry files and callers"]);
-      expect(html.match(/<details/g)).toHaveLength(3);
+      ).toEqual(["Mago checks", "Entry files and callers"]);
+      expect(html.match(/<details/g)).toHaveLength(2);
       expect(html).not.toMatch(/<details[^>]*\bopen/);
       expect(html).not.toContain("Secret setup detail");
       expect(html).not.toContain("Loading file");

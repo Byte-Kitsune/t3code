@@ -18,9 +18,11 @@ import {
   normalizeMonolithAreaPath,
   validateMonolithAreas,
   editMonolithMagoDocker,
+  editMonolithDoctrineThresholdOverride,
   normalizeMonolithMagoDocker,
 } from "./MonolithAreasPanel.logic";
 import { SettingsSection } from "./settingsLayout";
+import { MonolithCommentMarkers } from "./MonolithCommentMarkers";
 
 const AREA_KINDS = [
   { value: "php", label: "PHP" },
@@ -168,6 +170,14 @@ function MonolithAreaEditor({
         ...area,
         name: area.name.trim(),
         ...(area.magoDocker ? { magoDocker: normalizeMonolithMagoDocker(area.magoDocker) } : {}),
+        ...(area.commentMarkers
+          ? {
+              commentMarkers: area.commentMarkers.map((rule) => ({
+                ...rule,
+                marker: rule.marker.trim(),
+              })),
+            }
+          : {}),
         path: normalizeMonolithAreaPath(area.path)!,
         ...(area.entrypointPaths
           ? {
@@ -304,6 +314,41 @@ function MonolithAreaEditor({
                 {area.magoDocker ? (
                   <details>
                     <summary className="cursor-pointer text-xs">Docker paths (optional)</summary>
+                    <label className="mt-2 block space-y-1 text-xs">
+                      <span>Compose files (optional, in merge order)</span>
+                      <Input
+                        size="sm"
+                        font="mono"
+                        disabled={disabled}
+                        aria-label={`Area ${index + 1} Compose files`}
+                        value={area.magoDocker.composeFiles?.join(", ") ?? ""}
+                        placeholder="infrastructure/docker/compose.yml, infrastructure/docker/catalog.yml"
+                        onChange={(event) => {
+                          const files = event.currentTarget.value
+                            .split(",")
+                            .map((file) => file.trim())
+                            .filter(Boolean);
+                          setSaved(false);
+                          setAreas((current) =>
+                            current.map((entry) =>
+                              entry.id === area.id && entry.magoDocker
+                                ? {
+                                    ...entry,
+                                    magoDocker: {
+                                      ...entry.magoDocker,
+                                      composeFiles: files.length ? files : undefined,
+                                    },
+                                  }
+                                : entry,
+                            ),
+                          );
+                        }}
+                      />
+                      <p className="text-muted-foreground">
+                        Repository-relative paths. Blank uses the main Compose file and its
+                        includes. Relative Docker paths follow the first file.
+                      </p>
+                    </label>
                     <div className="mt-2 grid gap-2 sm:grid-cols-2">
                       {(
                         [
@@ -353,6 +398,109 @@ function MonolithAreaEditor({
                       ))}
                     </div>
                   </details>
+                ) : null}
+              </div>
+            ) : null}
+            {area.kind === "php" ? (
+              <MonolithCommentMarkers
+                markers={area.commentMarkers}
+                disabled={disabled}
+                areaLabel={`Area ${index + 1}`}
+                onChange={(commentMarkers) => {
+                  setSaved(false);
+                  setAreas((current) =>
+                    current.map((entry) => {
+                      if (entry.id !== area.id) return entry;
+                      const { commentMarkers: _previous, ...rest } = entry;
+                      return commentMarkers === undefined ? rest : { ...rest, commentMarkers };
+                    }),
+                  );
+                }}
+              />
+            ) : null}
+            {area.kind === "php" ? (
+              <div className="space-y-2 text-xs">
+                <p className="font-medium">Inline Doctrine query thresholds</p>
+                <label className="flex items-center justify-between gap-2">
+                  <span>Override extension thresholds in T3</span>
+                  <Switch
+                    size="sm"
+                    checked={area.doctrineQueryThresholds !== undefined}
+                    disabled={disabled}
+                    aria-label={`Area ${index + 1} override extension query thresholds`}
+                    onCheckedChange={(enabled) => {
+                      setSaved(false);
+                      setAreas((current) =>
+                        current.map((entry) =>
+                          entry.id === area.id
+                            ? editMonolithDoctrineThresholdOverride(entry, enabled)
+                            : entry,
+                        ),
+                      );
+                    }}
+                  />
+                </label>
+                {!area.doctrineQueryThresholds ? (
+                  <p className="text-muted-foreground">
+                    Use extension configuration. Thresholds are read from .mago/extension.php when
+                    possible; the effective values and their source appear with the inline
+                    estimates.
+                  </p>
+                ) : null}
+                {area.doctrineQueryThresholds ? (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {(["warning", "error"] as const).map((level) => (
+                      <label key={level} className="block space-y-1">
+                        <span>{level === "warning" ? "Warning from" : "Error from"}</span>
+                        <Input
+                          size="sm"
+                          type="number"
+                          min={0}
+                          step={1}
+                          disabled={disabled}
+                          aria-label={`Area ${index + 1} query ${level} threshold`}
+                          value={
+                            area.doctrineQueryThresholds?.[level] ?? (level === "warning" ? 10 : 50)
+                          }
+                          onChange={(event) =>
+                            updateArea(area.id, {
+                              doctrineQueryThresholds: {
+                                warning: area.doctrineQueryThresholds?.warning ?? 10,
+                                error: area.doctrineQueryThresholds?.error ?? 50,
+                                [level]:
+                                  event.currentTarget.value === ""
+                                    ? -1
+                                    : Number(event.currentTarget.value),
+                              },
+                            })
+                          }
+                        />
+                      </label>
+                    ))}
+                  </div>
+                ) : null}
+                <p className="text-muted-foreground">
+                  Query estimates appear above methods. The upper bound determines the color; an
+                  unknown upper bound shows an incomplete-analysis warning.
+                </p>
+                {area.doctrineQueryThresholds ? (
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    disabled={disabled}
+                    onClick={() => {
+                      setSaved(false);
+                      setAreas((current) =>
+                        current.map((entry) => {
+                          if (entry.id !== area.id) return entry;
+                          const { doctrineQueryThresholds: _previous, ...rest } = entry;
+                          return rest;
+                        }),
+                      );
+                    }}
+                  >
+                    Use extension configuration
+                  </Button>
                 ) : null}
               </div>
             ) : null}

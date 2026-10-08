@@ -24,6 +24,9 @@ export function fileCheckSummary(check: FileCheck): string | null {
   const unavailable = check.result.runs.filter((run) => run.status === "unavailable").length;
   if (failed) parts.push(`${failed} check${failed === 1 ? "" : "s"} failed`);
   if (unavailable) parts.push(`${unavailable} unavailable`);
+  const queries = check.result.queryBudget;
+  if (queries && ["unavailable", "unsupported", "failed"].includes(queries.status))
+    parts.push(`Doctrine queries ${queries.status}`);
   if (parts.length) return parts.join(" · ");
   return check.result.runs.length ? "No findings" : "No analyzer available";
 }

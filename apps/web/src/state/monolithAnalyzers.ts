@@ -15,9 +15,29 @@ const discovery = createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
 });
 const checkRevision = Atom.family((_key: string) => Atom.make(0));
 
+const indexStatus = createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {
+  label: "environment-data:monolith:index-status",
+  tag: WS_METHODS.projectsMonolithIndexStatus,
+  staleTimeMs: 2_000,
+  idleTtlMs: 60_000,
+});
+
 export const monolithAnalyzerEnvironment = {
   discovery,
   checkRevision,
+  indexStatus,
+  index: createEnvironmentRpcCommand(connectionAtomRuntime, {
+    label: "environment-data:monolith:index",
+    tag: WS_METHODS.projectsMonolithIndex,
+    concurrency: {
+      mode: "serial",
+      key: ({ environmentId, input }) => `${environmentId}:${input.cwd}`,
+    },
+    onSuccess: ({ environmentId, input }, registry) =>
+      Effect.sync(() => {
+        registry.refresh(indexStatus({ environmentId, input: { cwd: input.cwd } }));
+      }),
+  }),
   checkFile: createEnvironmentRpcCommand(connectionAtomRuntime, {
     label: "environment-data:monolith:check-file",
     tag: WS_METHODS.projectsMonolithCheckFile,

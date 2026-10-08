@@ -1,3 +1,4 @@
+import * as MonolithIndexService from "./project/MonolithIndexService.ts";
 import * as SymfonyReferenceService from "./project/SymfonyReferenceService.ts";
 import * as MonolithAnalyzerService from "./project/MonolithAnalyzerService.ts";
 import { MonolithAnalyzerRequestError } from "@t3tools/contracts";
@@ -1207,6 +1208,7 @@ const layerWsRpc = (
       const projectService = yield* ProjectService.ProjectService;
       const monolithService = yield* MonolithService.MonolithService;
       const monolithAnalyzers = yield* MonolithAnalyzerService.MonolithAnalyzerService;
+      const monolithIndex = yield* MonolithIndexService.MonolithIndexService;
       const symfonyReferences = yield* SymfonyReferenceService.SymfonyReferenceService;
       const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
@@ -2657,9 +2659,27 @@ const layerWsRpc = (
                 }),
             ),
           ),
+        [WS_METHODS.projectsMonolithIndex]: (input) =>
+          monolithIndex
+            .index(input)
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new MonolithAnalyzerRequestError({ operation: "check", cwd: input.cwd, cause }),
+              ),
+            ),
+        [WS_METHODS.projectsMonolithIndexStatus]: (input) =>
+          monolithIndex
+            .status(input)
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new MonolithAnalyzerRequestError({ operation: "check", cwd: input.cwd, cause }),
+              ),
+            ),
         [WS_METHODS.projectsMonolithCheckFile]: (input) =>
-          monolithAnalyzers
-            .checkFile(input)
+          monolithIndex
+            .checkFileCached(input)
             .pipe(
               Effect.mapError(
                 (cause) =>

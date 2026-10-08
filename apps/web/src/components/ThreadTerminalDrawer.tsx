@@ -27,6 +27,7 @@ import {
   type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
   type ThreadId,
+  type TerminalComposeInput,
 } from "@t3tools/contracts";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import * as Schema from "effect/Schema";
@@ -328,7 +329,9 @@ export function shouldHandleTerminalExit(
   );
 }
 
-interface TerminalViewportProps {
+export interface TerminalViewportProps {
+  compose?: TerminalComposeInput;
+  readOnly?: boolean;
   advancedTypography: boolean;
   threadRef: ScopedThreadRef;
   threadId: ThreadId;
@@ -355,6 +358,8 @@ interface TerminalLaunchLocation {
 }
 
 export function TerminalViewport({
+  compose,
+  readOnly = false,
   advancedTypography,
   threadRef,
   threadId,
@@ -378,8 +383,8 @@ export function TerminalViewport({
   const visibleRef = useRef(visible);
   const environmentId = threadRef.environmentId;
   const canOperateTerminal = useEnvironmentScope(environmentId, AuthTerminalOperateScope);
-  const hasTerminalWriteAccess = useEffectEvent(() =>
-    readEnvironmentScope(environmentId, AuthTerminalOperateScope),
+  const hasTerminalWriteAccess = useEffectEvent(
+    () => !readOnly && readEnvironmentScope(environmentId, AuthTerminalOperateScope),
   );
   const canOpenHostEditor = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
   const canActivateTerminalLink = useEffectEvent(
@@ -441,6 +446,7 @@ export function TerminalViewport({
       ...(worktreePath !== undefined ? { worktreePath } : {}),
       ...(runtimeEnv ? { env: runtimeEnv } : {}),
       ...(providerInstanceId ? { providerInstanceId } : {}),
+      ...(compose ? { compose } : {}),
     },
   });
   const canResizeTerminal =
@@ -453,7 +459,8 @@ export function TerminalViewport({
     }),
   );
   const resizeTerminal = useEffectEvent((cols: number, rows: number) => {
-    if (!canResizeTerminal || !hasTerminalWriteAccess()) return;
+    if (!canResizeTerminal || !readEnvironmentScope(environmentId, AuthTerminalOperateScope))
+      return;
     return runTerminalResize({
       environmentId,
       input: { threadId, terminalId, cols, rows },
@@ -503,8 +510,8 @@ export function TerminalViewport({
   }, [keybindings]);
 
   useLayoutEffect(() => {
-    if (terminalRef.current) terminalRef.current.input.readOnly = !canOperateTerminal;
-  }, [canOperateTerminal]);
+    if (terminalRef.current) terminalRef.current.input.readOnly = readOnly || !canOperateTerminal;
+  }, [canOperateTerminal, readOnly]);
 
   // A grant can change while the pointer remains over a link.
   useEffect(() => {
@@ -1053,7 +1060,7 @@ export function TerminalViewport({
   );
 }
 
-interface ThreadTerminalDrawerProps {
+export interface ThreadTerminalDrawerProps {
   mode?: "drawer" | "panel";
   threadRef: ScopedThreadRef;
   threadId: ThreadId;
@@ -1129,7 +1136,7 @@ function TerminalActionButton({
   );
 }
 
-export default function ThreadTerminalDrawer({
+export function NormalThreadTerminalDrawer({
   mode = "drawer",
   threadRef,
   threadId,
@@ -1818,3 +1825,5 @@ export default function ThreadTerminalDrawer({
     </aside>
   );
 }
+
+export { default } from "./DockerTerminalDrawer";

@@ -14,6 +14,7 @@ import {
   TerminalCwdNotFoundError,
   TerminalCwdStatError,
   TerminalError,
+  TerminalComposeError,
   TerminalHistoryError,
   TerminalNotRunningError,
   TerminalProviderInstanceNotFoundError,
@@ -78,6 +79,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
 import * as PtyAdapter from "./PtyAdapter.ts";
+import { TerminalComposeLaunch, type ComposeLaunchCommand } from "./ComposeLaunch.ts";
 
 export {
   TerminalCwdError,
@@ -281,6 +283,8 @@ export interface TerminalStartInput extends TerminalOpenInput {
 }
 
 interface TerminalSessionState {
+  compose?: TerminalOpenInput["compose"];
+  composeCleanup?: Effect.Effect<void> | undefined;
   threadId: string;
   terminalId: string;
   cwd: string;
@@ -1352,6 +1356,9 @@ function normalizedRuntimeEnv(
 }
 
 interface TerminalManagerOptions {
+  resolveComposeLaunch?: (
+    input: TerminalOpenInput,
+  ) => Effect.Effect<ComposeLaunchCommand, TerminalComposeError>;
   logsDir: string;
   historyLineLimit?: number;
   historyByteLimit?: number;
@@ -1436,6 +1443,7 @@ export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
 export const make = Effect.fn("TerminalManager.make")(function* () {
   const { terminalLogsDir, providerStatusCacheDir, baseDir } = yield* ServerConfig.ServerConfig;
   const ptyAdapter = yield* PtyAdapter.PtyAdapter;
+  const composeLaunch = yield* TerminalComposeLaunch;
   const portDiscovery = yield* PortScanner.PortDiscovery;
   const nativeTelemetry = yield* NativeTelemetryClient.NativeTelemetryClient;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -1453,6 +1461,7 @@ export const make = Effect.fn("TerminalManager.make")(function* () {
   return yield* makeWithOptions({
     logsDir: terminalLogsDir,
     ptyAdapter,
+    resolveComposeLaunch: composeLaunch.resolve,
     processTable: nativeTelemetry.processTable.pipe(
       Effect.mapError(
         (cause) => new TerminalSubprocessCheckError({ cause, command: "resource-monitor" }),
@@ -2123,6 +2132,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   const stopProcess = Effect.fn("terminal.stopProcess")(function* (session: TerminalSessionState) {
     const process = session.process;
+    const composeCleanup = session.composeCleanup;
+    session.composeCleanup = undefined;
+    if (composeCleanup) yield* composeCleanup;
     if (!process) return;
 
     const updatedAt = yield* nowIso;
@@ -2243,7 +2255,21 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       increment(terminalSessionsTotal, { lifecycle: eventType }).pipe(
         Effect.andThen(
           Effect.gen(function* () {
-            const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
+            const composeInput = input.compose ?? session.compose;
+            const composeCommand = composeInput
+              ? yield* options.resolveComposeLaunch
+                  ? options.resolveComposeLaunch({ ...input, compose: composeInput })
+                  : Effect.fail(
+                      new TerminalComposeError({
+                        message: "Docker terminal support is unavailable on this server.",
+                      }),
+                    )
+              : null;
+            if (composeCommand) session.composeCleanup = composeCommand.cleanup;
+            session.compose = composeInput;
+            const shellCandidates = composeCommand
+              ? [composeCommand]
+              : resolveShellCandidates(shellResolver, platform, baseEnv);
             const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv, platform);
             // Append (never prepend) managed ACP agent install directories so
             // `kimi login` and friends resolve by name without shadowing any
@@ -2562,6 +2588,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         session: TerminalSessionState,
       ) {
         cleanupProcessHandles(session);
+        if (session.composeCleanup) yield* session.composeCleanup;
+        session.composeCleanup = undefined;
         if (!session.process) return;
         yield* clearKillFiber(session.process);
         yield* runKillEscalation(session.process, session.threadId, session.terminalId);
@@ -2632,6 +2660,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           cols,
           rows,
           ...(input.env ? { env: input.env } : {}),
+          ...(input.compose ? { compose: input.compose } : {}),
         },
         "started",
       );
@@ -2647,6 +2676,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     const nextWorktreePath =
       input.worktreePath !== undefined ? (input.worktreePath ?? null) : liveSession.worktreePath;
     const launchContextChanged =
+      !Equal.equals(liveSession.compose, input.compose) ||
       liveSession.cwd !== input.cwd ||
       runtimeEnvChanged ||
       liveSession.worktreePath !== nextWorktreePath;
@@ -2656,6 +2686,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       liveSession.cwd = input.cwd;
       liveSession.worktreePath = nextWorktreePath;
       liveSession.runtimeEnv = nextRuntimeEnv;
+      liveSession.compose = input.compose;
       liveSession.history.clear();
       liveSession.pendingHistoryControlSequence = "";
       liveSession.pendingProcessEvents = [];
@@ -2684,6 +2715,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           cols: targetCols,
           rows: targetRows,
           ...(input.env ? { env: input.env } : {}),
+          ...(input.compose ? { compose: input.compose } : {}),
         },
         "started",
       );
@@ -2795,11 +2827,20 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     });
 
   const streamSession = (
-    input: TerminalObserveInput,
+    input: TerminalObserveInput | TerminalAttachInput,
     initial: Effect.Effect<TerminalSessionSnapshot, TerminalError>,
     listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
   ) => {
     let unsubscribe: (() => void) | null = null;
+    const ownedCompose = "compose" in input && input.compose !== undefined;
+    const closeOwned = () =>
+      ownedCompose
+        ? close({
+            threadId: input.threadId,
+            terminalId: input.terminalId,
+            deleteHistory: true,
+          }).pipe(Effect.ignore)
+        : Effect.void;
 
     return Effect.gen(function* () {
       const bufferedEvents: TerminalEvent[] = [];
@@ -2841,6 +2882,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       return () => {
         unsubscribe?.();
         unsubscribe = null;
+        if (ownedCompose) runFork(closeOwned());
       };
     }).pipe(
       Effect.catchCause((cause) =>
@@ -2849,7 +2891,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             unsubscribe?.();
             unsubscribe = null;
           }),
-          () => Effect.failCause(cause),
+          () => closeOwned().pipe(Effect.uninterruptible, Effect.andThen(Effect.failCause(cause))),
         ),
       ),
     );
@@ -2961,6 +3003,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         terminalId,
       });
     }
+    if (session.compose?.mode === "logs")
+      return yield* new TerminalWriteError({
+        threadId: input.threadId,
+        terminalId,
+        terminalPid: process.pid,
+        cause: new Error("Docker Compose logs are read-only."),
+      });
     session.inputCount += 1;
     yield* Effect.try({
       try: () => process.write(input.data),
@@ -3087,6 +3136,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           cols,
           rows,
           ...(input.env ? { env: input.env } : {}),
+          ...(input.compose ? { compose: input.compose } : {}),
         },
         "restarted",
       );

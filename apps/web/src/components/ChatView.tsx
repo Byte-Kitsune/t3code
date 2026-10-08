@@ -1,3 +1,4 @@
+import { useMonolithIndex } from "~/hooks/useMonolithIndex";
 import { useMonolithAreas } from "~/hooks/useMonolithAreas";
 import { ChatCanvas } from "./chat/ChatCanvas";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
@@ -4106,13 +4107,19 @@ export default function ChatView(props: ChatViewProps) {
         worktreePath: activeThread?.worktreePath ?? null,
       })
     : null;
-  useMonolithAreas(
+  const monolithAreas = useMonolithAreas(
     environmentId,
     isPreparingWorktree ||
       worktreeSetupBlocksSend ||
       (activeProjectClone !== null && activeProjectClone.phase !== "done")
       ? null
       : gitCwd,
+  );
+  useMonolithIndex(
+    environmentId,
+    monolithAreas.config ? gitCwd : null,
+    monolithAreas.config,
+    workspaceMutationId,
   );
   const gitStatusCwd = activeThread?.worktreePath ?? gitCwd;
   const gitStatusQuery = useEnvironmentQuery(

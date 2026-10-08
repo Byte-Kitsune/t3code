@@ -85,3 +85,47 @@ describe("file analyzer diagnostics", () => {
     expect(mergeFileAnalyzerAnnotations([], [])).toEqual([]);
   });
 });
+
+it("keeps above-method estimates and declaration hints alongside existing review and analyzer findings", () => {
+  const query = {
+    lineNumber: 1,
+    method: {
+      symbol: "Service::load",
+      path: "app/src/File.php",
+      line: 2,
+      lowerBound: 12,
+      upperBound: 12,
+      unknown: [],
+      cycles: [],
+    },
+    severity: "warning" as const,
+  };
+  const dev = {
+    lineNumber: 1,
+    site: {
+      symbol: "Service::load",
+      targetSymbol: "Port::load",
+      kind: "implementation" as const,
+      path: "app/src/File.php",
+      line: 2,
+      column: 20,
+      endLine: 2,
+      endColumn: 24,
+      annotations: [
+        {
+          marker: "@deprecated",
+          severity: "warning" as const,
+          message: "Use loadMany",
+          path: "app/src/Port.php",
+          line: 4,
+          column: 1,
+        },
+      ],
+    },
+  };
+  const rows = mergeFileAnalyzerAnnotations([], [{ ...finding, line: 1 }], [query], [dev]);
+  expect(rows).toHaveLength(1);
+  expect(rows[0]!.metadata.diagnostics).toEqual([{ ...finding, line: 1 }]);
+  expect(rows[0]!.metadata.queries).toEqual([query]);
+  expect(rows[0]!.metadata.devComments).toEqual([dev]);
+});

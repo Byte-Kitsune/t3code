@@ -27,6 +27,9 @@ export const MonolithMagoDocker = Schema.Struct({
     }),
   ),
   composeDirectory: Schema.optional(MonolithAreaPath),
+  composeFiles: Schema.optional(
+    Schema.Array(MonolithAreaPath).check(Schema.isMinLength(1), Schema.isMaxLength(32)),
+  ),
   containerPath: Schema.optional(
     TrimmedNonEmptyString.check(
       Schema.isMaxLength(1024),
@@ -61,6 +64,37 @@ export const MonolithMagoDocker = Schema.Struct({
 });
 export type MonolithMagoDocker = typeof MonolithMagoDocker.Type;
 
+export const MonolithDoctrineQueryThresholds = Schema.Struct({
+  warning: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  error: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+}).check(
+  Schema.makeFilter((value) => value.warning < value.error, {
+    expected: "a query warning threshold below the error threshold",
+  }),
+);
+export type MonolithDoctrineQueryThresholds = typeof MonolithDoctrineQueryThresholds.Type;
+
+export const MonolithCommentMarker = Schema.Struct({
+  marker: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(128),
+    Schema.makeFilter(
+      (value: string) =>
+        !Array.from(value).some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127),
+      {
+        expected: "a single-line comment marker",
+      },
+    ),
+  ),
+  severity: Schema.Literals(["info", "warning", "error", "reference"]),
+});
+export type MonolithCommentMarker = typeof MonolithCommentMarker.Type;
+export const MonolithCommentMarkers = Schema.Array(MonolithCommentMarker).check(
+  Schema.isMaxLength(32),
+  Schema.makeFilter((rules) => new Set(rules.map((rule) => rule.marker)).size === rules.length, {
+    expected: "unique comment markers",
+  }),
+);
+
 export const MonolithArea = Schema.Struct({
   id: TrimmedNonEmptyString.check(Schema.isMaxLength(1100)),
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
@@ -68,6 +102,8 @@ export const MonolithArea = Schema.Struct({
   kind: Schema.Literals(["php", "react", "folder"]),
   enabled: Schema.optional(Schema.Boolean),
   magoDocker: Schema.optional(MonolithMagoDocker),
+  doctrineQueryThresholds: Schema.optional(MonolithDoctrineQueryThresholds),
+  commentMarkers: Schema.optional(MonolithCommentMarkers),
   entrypointPaths: Schema.optional(Schema.Array(MonolithAreaPath).check(Schema.isMaxLength(100))),
 });
 export type MonolithArea = typeof MonolithArea.Type;
@@ -183,14 +219,84 @@ export const MonolithEntryTarget = Schema.Struct({
   truncated: Schema.Boolean,
   cycles: Schema.optional(Schema.Array(Schema.String)),
 });
+export const MonolithSourceAnnotation = Schema.Struct({
+  marker: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  severity: Schema.Literals(["info", "warning", "error", "reference"]),
+  message: Schema.String.check(Schema.isMaxLength(4096)),
+  path: MonolithAreaPath,
+  line: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  column: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+});
+export type MonolithSourceAnnotation = typeof MonolithSourceAnnotation.Type;
+export const MonolithSymbolMetadata = Schema.Struct({
+  symbol: TrimmedNonEmptyString.check(Schema.isMaxLength(4096)),
+  kind: Schema.Literals(["class", "interface", "trait", "enum", "method"]),
+  path: MonolithAreaPath,
+  line: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  column: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  annotations: Schema.Array(MonolithSourceAnnotation).check(Schema.isMaxLength(128)),
+});
+export type MonolithSymbolMetadata = typeof MonolithSymbolMetadata.Type;
+export const MonolithAnnotationSite = Schema.Struct({
+  symbol: TrimmedNonEmptyString.check(Schema.isMaxLength(4096)),
+  targetSymbol: TrimmedNonEmptyString.check(Schema.isMaxLength(4096)),
+  kind: Schema.Literals([
+    "declaration",
+    "implementation",
+    "call",
+    "new",
+    "extends",
+    "implements",
+    "type",
+  ]),
+  path: MonolithAreaPath,
+  line: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  column: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  endLine: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  endColumn: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  annotations: Schema.Array(MonolithSourceAnnotation).check(Schema.isMaxLength(128)),
+});
+export type MonolithAnnotationSite = typeof MonolithAnnotationSite.Type;
 export const MonolithEntryChains = Schema.Struct({
+  commentColumnEncoding: Schema.optional(Schema.Literal("utf8_bytes")),
+  symbolMetadata: Schema.optional(
+    Schema.Array(MonolithSymbolMetadata).check(Schema.isMaxLength(4096)),
+  ),
+  annotationSites: Schema.optional(
+    Schema.Array(MonolithAnnotationSite).check(Schema.isMaxLength(4096)),
+  ),
   status: MonolithInsightStatus,
   message: Schema.optional(Schema.String),
   targets: Schema.Array(MonolithEntryTarget),
 });
 export type MonolithEntryChains = typeof MonolithEntryChains.Type;
 
+export const MonolithEffectiveDoctrineQueryThresholds = Schema.Struct({
+  warning: Schema.Number.check(
+    Schema.isInt(),
+    Schema.isGreaterThanOrEqualTo(0),
+    Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+  ),
+  error: Schema.Number.check(
+    Schema.isInt(),
+    Schema.isGreaterThanOrEqualTo(0),
+    Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+  ),
+}).check(
+  Schema.makeFilter((value) => value.warning <= value.error, {
+    expected: "ordered query thresholds",
+  }),
+);
+export const MonolithDoctrineQueryThresholdsSource = Schema.Struct({
+  kind: Schema.Literals(["extension", "default", "override", "unresolved"]),
+  path: Schema.optional(MonolithAreaPath),
+  message: Schema.optional(Schema.String.check(Schema.isMaxLength(4096))),
+});
+export type MonolithDoctrineQueryThresholdsSource =
+  typeof MonolithDoctrineQueryThresholdsSource.Type;
 export const MonolithCheckFileResult = Schema.Struct({
+  doctrineQueryThresholds: Schema.optional(MonolithEffectiveDoctrineQueryThresholds),
+  doctrineQueryThresholdsSource: Schema.optional(MonolithDoctrineQueryThresholdsSource),
   areaId: Schema.NullOr(Schema.String),
   diagnostics: Schema.Array(MonolithAnalyzerDiagnostic),
   runs: Schema.Array(MonolithAnalyzerRun),
@@ -199,6 +305,27 @@ export const MonolithCheckFileResult = Schema.Struct({
   revision: Schema.String,
 });
 export type MonolithCheckFileResult = typeof MonolithCheckFileResult.Type;
+export const MonolithIndexInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  areaId: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(1100))),
+  force: Schema.optional(Schema.Boolean),
+});
+export type MonolithIndexInput = typeof MonolithIndexInput.Type;
+export const MonolithIndexStatusInput = Schema.Struct({ cwd: TrimmedNonEmptyString });
+export type MonolithIndexStatusInput = typeof MonolithIndexStatusInput.Type;
+export const MonolithIndexStatus = Schema.Struct({
+  areas: Schema.Array(
+    Schema.Struct({
+      areaId: TrimmedNonEmptyString,
+      status: Schema.Literals(["idle", "indexing", "ready", "stale", "failed"]),
+      fileCount: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+      revision: Schema.optional(Schema.String),
+      message: Schema.optional(Schema.String),
+    }),
+  ),
+});
+export type MonolithIndexStatus = typeof MonolithIndexStatus.Type;
+
 export const MonolithAnalyzerScript = Schema.Struct({
   name: Schema.String,
   operation: Schema.Literals(["format", "analyze", "guard", "lint", "check", "references"]),

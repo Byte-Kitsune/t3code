@@ -62,15 +62,6 @@ export function FileAnalysisHeader({ loading = false, ...props }: Props) {
       <AnalysisSection label="Mago checks">
         <MagoChecks check={props.check} loading={loading} />
       </AnalysisSection>
-      <AnalysisSection label="Doctrine queries">
-        {loading ? (
-          <p className="text-muted-foreground" role="status">
-            Loading file…
-          </p>
-        ) : (
-          <PhpFileInsights {...props} section="queries" />
-        )}
-      </AnalysisSection>
       <AnalysisSection label="Entry files and callers">
         {loading ? (
           <p className="text-muted-foreground" role="status">

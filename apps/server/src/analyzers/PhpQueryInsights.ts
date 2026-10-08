@@ -1,12 +1,35 @@
 /** Bundled with the server so packaged desktop/CLI builds do not need loose PHP assets. */
 export const phpQueryInsightsSource = String.raw`
+function t3QueryUnavailable(array $input, array $report): array
+{
+    if (!is_array($input['indexPaths'] ?? null)) return $report;
+    return ['files' => array_map(static fn (array $file): array => ['path' => $file['relativePath'], 'report' => $report], $input['indexPaths'])];
+}
+
 function t3QueryInsights(\Mago\Sdk\Analyzer\AfterAnalysisContext $context, array $input, array $bindings, array $constructorBindings): array
 {
     if (!class_exists(\ByteKitsune\MagoDoctrineQueryBudget\QueryBudgetExtension::class)) {
-        return ['status' => 'unavailable', 'message' => 'Install the Doctrine query-budget extension in this area.', 'methods' => []];
+        return t3QueryUnavailable($input, ['status' => 'unavailable', 'message' => 'Install the Doctrine query-budget extension in this area.', 'methods' => []]);
     }
     if (!method_exists(\ByteKitsune\MagoDoctrineQueryBudget\QueryBudgetExtension::class, 'inspectFile')) {
-        return ['status' => 'unsupported', 'message' => 'Update the Doctrine query-budget extension to 0.1.0-beta.12 or newer for file inspection.', 'methods' => []];
+        return t3QueryUnavailable($input, ['status' => 'unsupported', 'message' => 'Update the Doctrine query-budget extension to 0.1.0-beta.12 or newer for file inspection.', 'methods' => []]);
+    }
+    if (is_array($input['indexPaths'] ?? null)) {
+        $files = [];
+        $batch = method_exists(\ByteKitsune\MagoDoctrineQueryBudget\QueryBudgetExtension::class, 'inspectFiles')
+            ? \ByteKitsune\MagoDoctrineQueryBudget\QueryBudgetExtension::inspectFiles(
+                $context->analysis, array_column($input['indexPaths'], 'areaRelativePath'), $bindings, $constructorBindings,
+            ) : null;
+        foreach ($input['indexPaths'] as $file) {
+            $report = $batch[$file['areaRelativePath']] ?? \ByteKitsune\MagoDoctrineQueryBudget\QueryBudgetExtension::inspectFile(
+                $context->analysis, $file['areaRelativePath'], $bindings, $constructorBindings,
+            );
+            if (($report['schemaVersion'] ?? null) !== '1') throw new \RuntimeException('Unsupported Doctrine inspection schema.');
+            foreach ($report['methods'] as &$method) $method['path'] = $file['relativePath'];
+            unset($method);
+            $files[] = ['path' => $file['relativePath'], 'report' => $report];
+        }
+        return ['files' => $files];
     }
     $result = \ByteKitsune\MagoDoctrineQueryBudget\QueryBudgetExtension::inspectFile(
         $context->analysis, $input['areaRelativePath'], $bindings, $constructorBindings,
@@ -62,7 +85,10 @@ const strings = (value: unknown): readonly string[] => {
 
 /** A missing or malformed sidecar is a failed run, never a zero-query estimate. */
 export function decodePhpQueryInsights(raw: string, relativePath: string): PhpQueryInsights {
-  const report = object(JSON.parse(raw));
+  return normalizePhpQueryInsights(JSON.parse(raw), relativePath);
+}
+export function normalizePhpQueryInsights(value: unknown, relativePath: string): PhpQueryInsights {
+  const report = object(value);
   const status = text(report.status) as PhpQueryInsights["status"];
   if (!statuses.has(status) || !Array.isArray(report.methods) || report.methods.length > 512)
     throw new Error("Invalid query insights report.");

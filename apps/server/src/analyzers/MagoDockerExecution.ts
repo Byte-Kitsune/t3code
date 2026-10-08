@@ -33,6 +33,7 @@ export interface MagoDockerTemp {
 export interface MagoDockerSession {
   readonly hostAreaRoot: string;
   readonly containerAreaRoot: string;
+  readonly composeArgs: readonly string[];
   readonly toContainer: (hostPath: string) => string;
   readonly toHost: (containerPath: string) => string;
   readonly runMago: (
@@ -111,9 +112,21 @@ const make = Effect.gen(function* () {
         : paths.resolve(root, input.runtime.composeDirectory);
     if (!within(composeDirectory, root))
       return yield* new MagoDockerError({ stage: "configuration" });
+    const composeFiles = input.runtime.composeFiles?.map((file) => paths.resolve(root, file)) ?? [];
+    for (const file of composeFiles) {
+      if (
+        !within(file, root) ||
+        (yield* fs.realPath(file)) !== file ||
+        (yield* fs.stat(file)).type !== "File"
+      )
+        return yield* new MagoDockerError({ stage: "configuration" });
+    }
+    if (composeFiles.length && input.runtime.composeDirectory === undefined)
+      composeDirectory = paths.dirname(composeFiles[0]!);
     while (true) {
       if ((yield* fs.realPath(composeDirectory)) !== composeDirectory)
         return yield* new MagoDockerError({ stage: "configuration" });
+      if (composeFiles.length) break;
       let found = false;
       for (const name of [
         "compose.yaml",
@@ -153,7 +166,12 @@ const make = Effect.gen(function* () {
         })
         .pipe(Effect.mapError((cause) => new MagoDockerError({ stage: "process", cause })));
     });
-    const compose = ["compose", "--project-directory", composeDirectory];
+    const compose = [
+      "compose",
+      "--project-directory",
+      composeDirectory,
+      ...composeFiles.flatMap((file) => ["-f", file]),
+    ];
     const ids = yield* docker([...compose, "ps", "--quiet", input.runtime.service]).pipe(
       Effect.flatMap((output) =>
         Effect.try(() => checkOutput(output).trim().split(/\s+/).filter(Boolean)),
@@ -325,6 +343,7 @@ const make = Effect.gen(function* () {
     return {
       hostAreaRoot,
       containerAreaRoot,
+      composeArgs: compose,
       toContainer,
       toHost,
       runMago,

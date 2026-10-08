@@ -1,3 +1,15 @@
+import { MonolithIndexStatus } from "./MonolithIndexStatus";
+import { PhpQueryAnnotation } from "./PhpQueryAnnotation";
+import { PhpCommentAnnotation } from "./PhpCommentAnnotation";
+import {
+  buildPhpQueryAnnotations,
+  type PhpQueryAnnotation as QueryAnnotation,
+} from "./phpQueryAnnotations";
+import {
+  buildPhpCommentAnnotations,
+  syncPhpCommentHighlights,
+  type PhpCommentAnnotation as CommentAnnotation,
+} from "./phpCommentAnnotations";
 import { Spinner } from "~/components/ui/spinner";
 import {
   AuthPreviewOperateScope,
@@ -651,6 +663,9 @@ interface EditableFileSurfaceProps {
   composerDraftTarget: ScopedThreadRef | DraftId;
   contents: string;
   diagnostics: readonly MonolithAnalyzerDiagnostic[];
+  queries: readonly QueryAnnotation[];
+  devComments: readonly CommentAnnotation[];
+  onOpenFile: (path: string, line?: number) => void;
   resolvedTheme: "light" | "dark";
   revealRequestId: number;
   wordWrap: boolean;
@@ -671,6 +686,9 @@ function EditableFileSurface({
   composerDraftTarget,
   contents,
   diagnostics,
+  queries,
+  devComments,
+  onOpenFile,
   resolvedTheme,
   revealRequestId,
   wordWrap,
@@ -682,8 +700,8 @@ function EditableFileSurface({
   const removeReviewComment = useComposerDraftStore((store) => store.removeReviewComment);
   const [lineAnnotations, setLineAnnotations] = useState<FileCommentLineAnnotation[]>([]);
   const renderedAnnotations = useMemo(
-    () => mergeFileAnalyzerAnnotations(lineAnnotations, diagnostics),
-    [lineAnnotations, diagnostics],
+    () => mergeFileAnalyzerAnnotations(lineAnnotations, diagnostics, queries, devComments),
+    [lineAnnotations, diagnostics, queries, devComments],
   );
   const [selectionOverride, setSelectionOverride] = useState<FileSelectionOverride | null>(null);
   const selectedRange =
@@ -939,6 +957,11 @@ function EditableFileSurface({
                 {annotation.metadata.diagnostics?.length ? (
                   <FileAnalyzerAnnotation diagnostics={annotation.metadata.diagnostics} />
                 ) : null}
+                <PhpQueryAnnotation methods={annotation.metadata.queries ?? []} />
+                <PhpCommentAnnotation
+                  comments={annotation.metadata.devComments ?? []}
+                  onOpenFile={onOpenFile}
+                />
                 {annotation.metadata.entries.map((entry) => (
                   <DiffCommentAnnotation
                     key={entry.id}
@@ -977,6 +1000,9 @@ function RenderedMarkdownSurface({
   | "wordWrap"
   | "onPostRender"
   | "diagnostics"
+  | "queries"
+  | "devComments"
+  | "onOpenFile"
 > & {
   threadRef: ScopedThreadRef;
   readOnly: boolean;
@@ -1106,6 +1132,33 @@ export default function FilePreviewPanel({
     file.data?.truncated === false &&
     !file.hasUnsavedChanges &&
     !selectedFilePending;
+  const queryThresholds = fileCheck.result?.doctrineQueryThresholds;
+  const queryAnnotations = useMemo(
+    () =>
+      fileCheck.status === "checked" && file.data && relativePath && !isHostFile
+        ? buildPhpQueryAnnotations({
+            path: relativePath,
+            methods: fileCheck.result?.queryBudget?.methods ?? [],
+            lineCount: file.data.contents.split(/\r\n|\r|\n/).length,
+            ...(queryThresholds ? { thresholds: queryThresholds } : {}),
+            ...(fileCheck.result?.doctrineQueryThresholdsSource
+              ? { thresholdSource: fileCheck.result.doctrineQueryThresholdsSource }
+              : {}),
+          })
+        : [],
+    [fileCheck.status, fileCheck.result, file.data, relativePath, isHostFile, queryThresholds],
+  );
+  const commentAnnotations = useMemo(
+    () =>
+      graphReady && file.data && relativePath
+        ? buildPhpCommentAnnotations(
+            relativePath,
+            file.data.contents,
+            sourceGraph?.annotationSites ?? [],
+          )
+        : [],
+    [graphReady, file.data, relativePath, sourceGraph],
+  );
   const graphFileKey = JSON.stringify([environmentId, cwd, relativePath]);
   const [graphSelection, setGraphSelection] = useState<{
     fileKey: string;
@@ -1224,9 +1277,14 @@ export default function FilePreviewPanel({
   const onFilePostRender = useCallback<FilePostRender>(
     (container, instance, phase) => {
       syncFileAnalyzerGutter(container, phase === "unmount" ? [] : fileCheck.diagnostics);
+      syncPhpCommentHighlights(
+        container,
+        file.data?.contents ?? "",
+        phase === "unmount" ? [] : commentAnnotations,
+      );
       onFileRevealPostRender(container, instance, phase);
     },
-    [fileCheck.diagnostics, onFileRevealPostRender],
+    [fileCheck.diagnostics, onFileRevealPostRender, file.data?.contents, commentAnnotations],
   );
   useWorkspaceMutationRefresh({
     enabled:
@@ -1535,6 +1593,9 @@ export default function FilePreviewPanel({
                 cacheKey={projectFileCacheKey(cwd, relativePath, file.data.contents)}
                 onPostRender={onFilePostRender}
                 diagnostics={fileCheck.diagnostics}
+                queries={queryAnnotations}
+                devComments={commentAnnotations}
+                onOpenFile={onOpenFile}
                 {...(graphReady ? { onTokenClick: onSourceTokenClick } : {})}
               />
             ) : (
@@ -1547,6 +1608,9 @@ export default function FilePreviewPanel({
                   composerDraftTarget={composerDraftTarget}
                   contents={file.data.contents}
                   diagnostics={fileCheck.diagnostics}
+                  queries={queryAnnotations}
+                  devComments={commentAnnotations}
+                  onOpenFile={onOpenFile}
                   {...(graphReady ? { onTokenClick: onSourceTokenClick } : {})}
                   resolvedTheme={resolvedTheme}
                   revealRequestId={revealRequestId}
@@ -1560,6 +1624,7 @@ export default function FilePreviewPanel({
           {fileCheck.supported && !isHostFile && !isMedia && !isPdf && previewPath ? (
             <div className="min-h-7 shrink-0">
               <FileAnalyzerStatus check={fileCheck} />
+              <MonolithIndexStatus environmentId={environmentId} cwd={cwd} />
             </div>
           ) : null}
         </div>

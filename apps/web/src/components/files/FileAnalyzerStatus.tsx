@@ -1,5 +1,6 @@
 import type { useMonolithFileCheck } from "~/hooks/useMonolithFileCheck";
 import { fileCheckSummary } from "./fileAnalyzerStatus";
+import { phpInsightStatusLabel } from "./phpFileInsights";
 
 export function FileAnalyzerStatus({
   check,
@@ -38,6 +39,12 @@ export function FileAnalyzerStatus({
             {run.message ? ` — ${run.message}` : ""}
           </p>
         ))}
+        {check.status === "checked" && check.result?.queryBudget ? (
+          <p>
+            Doctrine queries: {phpInsightStatusLabel(check.result.queryBudget.status)}
+            {check.result.queryBudget.message ? ` — ${check.result.queryBudget.message}` : ""}
+          </p>
+        ) : null}
       </div>
     </details>
   );

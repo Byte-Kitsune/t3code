@@ -133,7 +133,9 @@ export function useAttachedTerminalSession(input: {
   const attach = useEnvironmentQuery(
     input.environmentId !== null && input.terminal !== null
       ? canOperate
-        ? terminalEnvironment.attach({
+        ? (input.terminal.compose
+            ? terminalEnvironment.attachEphemeral
+            : terminalEnvironment.attach)({
             environmentId: input.environmentId,
             input: input.terminal,
           })
