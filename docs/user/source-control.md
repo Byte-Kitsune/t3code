@@ -269,5 +269,14 @@ Invalid existing configuration is reported instead of replaced.
 ```
 
 The optional default base branch supplies the local Changes comparison target until you choose
-another branch. A hosted pull request keeps its own target branch. Analyzer execution and AI
-review are separate planned features; area grouping itself does not run Mago or Biome checks.
+another branch. A hosted pull request keeps its own target branch. Opening a saved PHP or React source file runs the locally installed analyzer and shows findings at
+source lines. PHP uses Mago format checks, analysis, and guard; React uses Biome checks. No formatting
+changes are applied. Missing tools and failed checks are shown separately from passing checks.
+Install tools with your project's usual package manager before opening files. Existing analyzer
+configuration is used, including Mago installed in a PHP area's `tools/` Composer project.
+
+The project settings show detected tools and configuration paths. If the Symfony Wiring exporter
+and application autoloader are installed, **Generate container reference** refreshes the dev-container
+reference. The Symfony application must be able to boot in that environment. This action writes the
+reference file and may warm Symfony's dev cache; file-open checks only read the current reference.
+Area-based AI review is a planned addition.

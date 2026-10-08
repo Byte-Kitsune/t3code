@@ -15,7 +15,7 @@ import { type EnvironmentId, type ProjectIconOverride } from "@t3tools/contracts
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import * as Cause from "effect/Cause";
 import { InfoIcon, Trash2Icon } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useComposerDraftStore } from "../../composerDraftStore";
 import { releaseProjectDraftUploads } from "../../lib/composerDraftUploads";
@@ -44,6 +44,7 @@ import {
 } from "./ProjectFaviconPickerDialog";
 import { ProjectActionsSettings } from "./ProjectActionsSettings";
 import { MonolithAreasPanel } from "./MonolithAreasPanel";
+import { MonolithAnalyzersPanel } from "./MonolithAnalyzersPanel";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { projectGroupTitleNeedsUpdate } from "./ProjectSettingsPanel.logic";
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
@@ -540,15 +541,24 @@ function ProjectDetail({
         <ProjectDefaultsSettings category="project" />
         <ProjectActionsSettings />
         {group.memberProjects.map((member) => (
-          <MonolithAreasPanel
-            key={member.physicalProjectKey}
-            environmentId={member.environmentId}
-            projectId={member.id}
-            cwd={member.workspaceRoot}
-            {...(hasMultipleCheckouts
-              ? { checkoutLabel: member.environmentLabel ?? member.workspaceRoot }
-              : {})}
-          />
+          <Fragment key={member.physicalProjectKey}>
+            <MonolithAreasPanel
+              environmentId={member.environmentId}
+              projectId={member.id}
+              cwd={member.workspaceRoot}
+              {...(hasMultipleCheckouts
+                ? { checkoutLabel: member.environmentLabel ?? member.workspaceRoot }
+                : {})}
+            />
+            <MonolithAnalyzersPanel
+              environmentId={member.environmentId}
+              projectId={member.id}
+              cwd={member.workspaceRoot}
+              {...(hasMultipleCheckouts
+                ? { checkoutLabel: member.environmentLabel ?? member.workspaceRoot }
+                : {})}
+            />
+          </Fragment>
         ))}
         {hasMultipleCheckouts ? checkoutChoices : null}
         <SettingsSection title="Danger">

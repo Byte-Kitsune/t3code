@@ -2,6 +2,8 @@ import * as Schema from "effect/Schema";
 import { GitPreparePullRequestThreadInput } from "./git.ts";
 import {
   AuthFilesystemWriteScope,
+  AuthFilesystemReadScope,
+  AuthTerminalOperateScope,
   AuthOrchestrationOperateScope,
   AuthSourceControlWriteScope,
   type AuthEnvironmentScope,
@@ -12,6 +14,8 @@ import { WS_METHODS } from "./rpc.ts";
 export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.projectsMonolithInitialize]: AuthFilesystemWriteScope,
   [WS_METHODS.projectsMonolithSave]: AuthFilesystemWriteScope,
+  [WS_METHODS.projectsMonolithCheckFile]: AuthTerminalOperateScope,
+  [WS_METHODS.projectsMonolithGenerateReferences]: AuthFilesystemWriteScope,
   [WS_METHODS.pullRequestsRunAction]: AuthSourceControlWriteScope,
   [WS_METHODS.pullRequestsUpdate]: AuthSourceControlWriteScope,
   [WS_METHODS.pullRequestsComment]: AuthSourceControlWriteScope,
@@ -51,6 +55,10 @@ export function clientRpcRequiredScopes(
   method: string,
   input: unknown,
 ): readonly AuthEnvironmentScope[] {
+  if (method === WS_METHODS.projectsMonolithGenerateReferences)
+    return [AuthFilesystemWriteScope, AuthTerminalOperateScope, AuthFilesystemReadScope];
+  if (method === WS_METHODS.projectsMonolithCheckFile)
+    return [AuthTerminalOperateScope, AuthFilesystemReadScope];
   if (method === WS_METHODS.gitPreparePullRequestThread && input !== undefined) {
     const payload = decodePrepareThread(input);
     if (payload.mode === "worktree" && payload.threadId !== undefined)

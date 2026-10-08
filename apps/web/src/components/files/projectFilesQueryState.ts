@@ -50,6 +50,7 @@ interface ProjectQueryState<A> {
 }
 
 interface ProjectFileQueryState extends ProjectQueryState<ProjectReadFileResult> {
+  readonly hasUnsavedChanges: boolean;
   readonly readError: ProjectReadFileError | null;
   /** The path exists but is not a regular file, typically a directory. */
   readonly isNotFile: boolean;
@@ -274,6 +275,7 @@ export function useProjectFileQuery(
   const readError = isProjectReadFileError(cause) ? cause : null;
 
   return {
+    hasUnsavedChanges: optimisticFile !== null && optimisticFile?.confirmedAgainst === undefined,
     data: canReadFiles ? (optimisticFile?.data ?? data) : null,
     error:
       !isQueryEnabled || fileAccess.isPending

@@ -1,3 +1,7 @@
+import * as SymfonyReferenceService from "./project/SymfonyReferenceService.ts";
+import * as MonolithAnalyzerService from "./project/MonolithAnalyzerService.ts";
+import * as AnalyzerDiscoveryService from "./project/AnalyzerDiscoveryService.ts";
+import * as AnalyzerExecution from "./analyzers/AnalyzerExecution.ts";
 import * as MonolithService from "./project/MonolithService.ts";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Clock from "effect/Clock";
@@ -410,6 +414,16 @@ const layerWorkspaceFileSystem = WorkspaceFileSystem.layer.pipe(
 
 const layerWorkspace = Layer.mergeAll(
   MonolithService.layer,
+  SymfonyReferenceService.layer.pipe(
+    Layer.provide(MonolithService.layer),
+    Layer.provide(AnalyzerDiscoveryService.layer),
+    Layer.provide(ProcessRunner.layer),
+  ),
+  MonolithAnalyzerService.layer.pipe(
+    Layer.provide(MonolithService.layer),
+    Layer.provide(AnalyzerDiscoveryService.layer),
+    Layer.provide(AnalyzerExecution.layer.pipe(Layer.provide(ProcessRunner.layer))),
+  ),
   WorkspacePaths.layer,
   layerWorkspaceEntries,
   layerWorkspaceFileSystem,

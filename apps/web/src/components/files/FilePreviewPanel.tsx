@@ -1,6 +1,7 @@
 import { Spinner } from "~/components/ui/spinner";
 import {
   AuthPreviewOperateScope,
+  type MonolithAnalyzerDiagnostic,
   type EditorId,
   type EnvironmentId,
   type ResolvedKeybindingsConfig,
@@ -51,6 +52,7 @@ import { MorphIcon } from "~/components/MorphIcon";
 import { useRemoteOpenState } from "~/remoteOpen";
 import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
 import { useTheme } from "~/hooks/useTheme";
+import { useMonolithFileCheck } from "~/hooks/useMonolithFileCheck";
 import { getLocalStorageItem, setLocalStorageItem, useLocalStorage } from "~/hooks/useLocalStorage";
 import { useWorkspaceMutationRefresh } from "~/hooks/useWorkspaceMutationRefresh";
 import { resolveDiffThemeName } from "~/lib/diffRendering";
@@ -79,7 +81,6 @@ import { FileBreadcrumbs } from "./FileBreadcrumbs";
 import { FileMarkdownPreview } from "./FileMarkdownPreview";
 import {
   type FileCommentAnnotationEntry,
-  type FileCommentAnnotationGroup,
   type FileCommentLineAnnotation,
   formatFileCommentRange,
   nextFileCommentId,
@@ -96,6 +97,12 @@ import {
   FileSurfaceLoading,
 } from "./fileSurfaceChrome";
 import SourceFilePreview from "./ReadOnlySourcePreview";
+import { FileAnalyzerAnnotation } from "./FileAnalyzerAnnotation";
+import { FileAnalyzerStatus } from "./FileAnalyzerStatus";
+import {
+  mergeFileAnalyzerAnnotations,
+  type FileAnalyzerAnnotationGroup,
+} from "./fileAnalyzerDiagnostics";
 import { resolveCenteredFileLineScrollTop } from "./fileLineReveal";
 import { DiffCommentAnnotation } from "../diffs/DiffCommentAnnotation";
 import { projectFileCacheKey } from "./fileContentRevision";
@@ -571,7 +578,7 @@ function useFileLineReveal(
   );
 }
 
-const createFileEditor: EditorFactory<FileCommentAnnotationGroup, undefined> = (
+const createFileEditor: EditorFactory<FileAnalyzerAnnotationGroup, undefined> = (
   editorType,
   options,
   editStateKey,
@@ -638,6 +645,7 @@ interface EditableFileSurfaceProps {
   relativePath: string;
   composerDraftTarget: ScopedThreadRef | DraftId;
   contents: string;
+  diagnostics: readonly MonolithAnalyzerDiagnostic[];
   resolvedTheme: "light" | "dark";
   revealRequestId: number;
   wordWrap: boolean;
@@ -656,6 +664,7 @@ function EditableFileSurface({
   relativePath,
   composerDraftTarget,
   contents,
+  diagnostics,
   resolvedTheme,
   revealRequestId,
   wordWrap,
@@ -665,6 +674,10 @@ function EditableFileSurface({
   const addReviewComment = useComposerDraftStore((store) => store.addReviewComment);
   const removeReviewComment = useComposerDraftStore((store) => store.removeReviewComment);
   const [lineAnnotations, setLineAnnotations] = useState<FileCommentLineAnnotation[]>([]);
+  const renderedAnnotations = useMemo(
+    () => mergeFileAnalyzerAnnotations(lineAnnotations, diagnostics),
+    [lineAnnotations, diagnostics],
+  );
   const [selectionOverride, setSelectionOverride] = useState<FileSelectionOverride | null>(null);
   const selectedRange =
     selectionOverride?.revealRequestId === revealRequestId ? selectionOverride.range : null;
@@ -694,8 +707,8 @@ function EditableFileSurface({
   }
   const { ready: editable, onPostRender: onEditablePostRender } =
     useEditableAfterHighlight(externalFile);
-  const editorRef = useRef<Editor<"file", FileCommentAnnotationGroup, undefined> | null>(null);
-  const editorOptions = useMemo<EditorOptions<"file", FileCommentAnnotationGroup, undefined>>(
+  const editorRef = useRef<Editor<"file", FileAnalyzerAnnotationGroup, undefined> | null>(null);
+  const editorOptions = useMemo<EditorOptions<"file", FileAnalyzerAnnotationGroup, undefined>>(
     () => ({
       onAttach: (editor) => {
         editorRef.current = editor;
@@ -713,14 +726,16 @@ function EditableFileSurface({
     ({
       file,
       lineAnnotations: nextLineAnnotations,
-    }: EditorChangeEvent<"file", FileCommentAnnotationGroup, undefined>) => {
+    }: EditorChangeEvent<"file", FileAnalyzerAnnotationGroup, undefined>) => {
       // Adopting an external change reports it as an edit; it is already on disk.
       if (file.contents === getProjectFileContents(environmentId, cwd, relativePath)) return;
       setEditedContents(file.contents);
       setProjectFileQueryData(environmentId, cwd, relativePath, file.contents);
       saveCoordinator.change(file.contents);
       if (!nextLineAnnotations) return;
-      const remapped = remapFileCommentAnnotations(nextLineAnnotations);
+      const remapped = remapFileCommentAnnotations(
+        nextLineAnnotations.filter((annotation) => annotation.metadata.entries.length > 0),
+      );
       // The editor hands back the array it was given until an edit moves an annotation.
       setLineAnnotations((current) => (current === nextLineAnnotations ? current : remapped));
       for (const annotation of remapped) {
@@ -890,7 +905,7 @@ function EditableFileSurface({
             intersectionObserverMargin: 1200,
           }}
         >
-          <File<FileCommentAnnotationGroup>
+          <File<FileAnalyzerAnnotationGroup>
             file={externalFile}
             edit={editable}
             editorOptions={editorOptions}
@@ -910,9 +925,12 @@ function EditableFileSurface({
               onPostRender: handlePostRender,
             }}
             selectedLines={selectedRange}
-            lineAnnotations={lineAnnotations}
+            lineAnnotations={renderedAnnotations}
             renderAnnotation={(annotation) => (
               <div className="py-1">
+                {annotation.metadata.diagnostics?.length ? (
+                  <FileAnalyzerAnnotation diagnostics={annotation.metadata.diagnostics} />
+                ) : null}
                 {annotation.metadata.entries.map((entry) => (
                   <DiffCommentAnnotation
                     key={entry.id}
@@ -950,6 +968,7 @@ function RenderedMarkdownSurface({
   | "revealRequestId"
   | "wordWrap"
   | "onPostRender"
+  | "diagnostics"
 > & {
   threadRef: ScopedThreadRef;
   readOnly: boolean;
@@ -1056,6 +1075,18 @@ export default function FilePreviewPanel({
     relativePath,
     attachment === undefined && relativePath !== null,
   );
+  const fileCheck = useMonolithFileCheck({
+    environmentId,
+    cwd,
+    path: !isHostFile && !isMedia && !isPdf ? relativePath : null,
+    contents: !isHostFile && !isMedia && !isPdf ? (file.data?.contents ?? null) : null,
+    onStale: file.refresh,
+    persisted:
+      !file.isPending &&
+      !file.hasUnsavedChanges &&
+      !selectedFilePending &&
+      file.data?.truncated === false,
+  });
   const attemptedPath = file.readError?.resolvedPath ?? file.readError?.operationPath;
   // A chat link cannot tell a folder from a file, so a folder arrives here as
   // a file surface and the read fails. Keep the breadcrumbs, drop the preview
@@ -1314,6 +1345,9 @@ export default function FilePreviewPanel({
           Preview limited to the first 1 MB of a {file.data.byteLength.toLocaleString()} byte file.
         </div>
       ) : null}
+      {fileCheck.supported && !isHostFile && !isMedia && !isPdf && previewPath && file.data ? (
+        <FileAnalyzerStatus check={fileCheck} />
+      ) : null}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div
           className={cn("min-w-0 flex-1 flex-col overflow-hidden", previewPath ? "flex" : "hidden")}
@@ -1423,16 +1457,18 @@ export default function FilePreviewPanel({
                 text={file.data.contents}
                 cacheKey={projectFileCacheKey(cwd, relativePath, file.data.contents)}
                 onPostRender={onFilePostRender}
+                diagnostics={fileCheck.diagnostics}
               />
             ) : (
               <DiffWorkerPoolProvider>
                 <EditableFileSurface
-                  key={`${relativePath}:${resolvedTheme}`}
+                  key={`${environmentId}:${cwd}:${relativePath}:${resolvedTheme}`}
                   environmentId={environmentId}
                   cwd={cwd}
                   relativePath={relativePath}
                   composerDraftTarget={composerDraftTarget}
                   contents={file.data.contents}
+                  diagnostics={fileCheck.diagnostics}
                   resolvedTheme={resolvedTheme}
                   revealRequestId={revealRequestId}
                   wordWrap={wordWrap}

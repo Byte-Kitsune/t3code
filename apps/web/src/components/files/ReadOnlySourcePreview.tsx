@@ -6,6 +6,13 @@ import { useTheme } from "~/hooks/useTheme";
 import { resolveDiffThemeName } from "~/lib/diffRendering";
 import { PREFERRED_HIGHLIGHTER } from "~/lib/syntaxHighlighting";
 
+import type { MonolithAnalyzerDiagnostic } from "@t3tools/contracts";
+import {
+  mergeFileAnalyzerAnnotations,
+  type FileAnalyzerAnnotationGroup,
+} from "./fileAnalyzerDiagnostics";
+import { FileAnalyzerAnnotation } from "./FileAnalyzerAnnotation";
+
 import { FILE_LINK_REVEAL_UNSAFE_CSS } from "./fileSurfaceChrome";
 
 /**
@@ -17,7 +24,8 @@ export default function ReadOnlySourcePreview(props: {
   readonly name: string;
   readonly text: string;
   readonly cacheKey?: string;
-  readonly onPostRender?: FileOptions<unknown, undefined>["onPostRender"];
+  readonly diagnostics?: readonly MonolithAnalyzerDiagnostic[];
+  readonly onPostRender?: FileOptions<FileAnalyzerAnnotationGroup, undefined>["onPostRender"];
 }) {
   const { resolvedTheme } = useTheme();
   const wordWrap = useClientSettings((settings) => settings.wordWrap);
@@ -28,7 +36,11 @@ export default function ReadOnlySourcePreview(props: {
         className="file-preview-virtualizer min-h-0 flex-1 overflow-auto"
         config={{ overscrollSize: 600, intersectionObserverMargin: 1200 }}
       >
-        <File
+        <File<FileAnalyzerAnnotationGroup>
+          lineAnnotations={mergeFileAnalyzerAnnotations([], props.diagnostics ?? [])}
+          renderAnnotation={(annotation) => (
+            <FileAnalyzerAnnotation diagnostics={annotation.metadata.diagnostics ?? []} />
+          )}
           file={{
             name: props.name,
             contents: props.text,

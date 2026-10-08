@@ -188,6 +188,7 @@ vi.mock("./settingsLayout", () => ({
 vi.mock("./ProjectDefaultsSettings", () => ({ ProjectDefaultsSettings: () => null }));
 vi.mock("./ProjectActionsSettings", () => ({ ProjectActionsSettings: () => null }));
 vi.mock("./MonolithAreasPanel", () => ({ MonolithAreasPanel: () => null }));
+vi.mock("./MonolithAnalyzersPanel", () => ({ MonolithAnalyzersPanel: () => null }));
 vi.mock("../ProjectFavicon", () => ({ ProjectFavicon: () => null }));
 vi.mock("../chat/ProviderModelPicker", () => ({ ProviderModelPicker: "model-picker" }));
 vi.mock("../chat/TraitsPicker", () => ({ TraitsPicker: "traits-picker" }));

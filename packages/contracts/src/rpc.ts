@@ -1,3 +1,10 @@
+import { MonolithGenerateReferencesInput, MonolithGenerateReferencesResult } from "./monolith.ts";
+import {
+  MonolithCheckFileInput,
+  MonolithCheckFileResult,
+  MonolithAnalyzersResult,
+  MonolithAnalyzerRequestError,
+} from "./monolith.ts";
 import {
   MonolithArea,
   MonolithGetInput,
@@ -368,6 +375,9 @@ export const WS_METHODS = {
   projectsMonolithInitialize: "projects.monolith.initialize",
   projectsMonolithDiscover: "projects.monolith.discover",
   projectsMonolithSave: "projects.monolith.save",
+  projectsMonolithAnalyzers: "projects.monolith.analyzers",
+  projectsMonolithCheckFile: "projects.monolith.checkFile",
+  projectsMonolithGenerateReferences: "projects.monolith.generateReferences",
   projectsReadFile: "projects.readFile",
   projectsSearchContents: "projects.searchContents",
   projectsSearchEntries: "projects.searchEntries",
@@ -1158,6 +1168,25 @@ const WsSourceControlPublishRepositoryRpc = Rpc.make(WS_METHODS.sourceControlPub
   error: Schema.Union([SourceControlRepositoryError, EnvironmentAuthorizationError]),
 });
 
+const WsProjectsMonolithGenerateReferencesRpc = Rpc.make(
+  WS_METHODS.projectsMonolithGenerateReferences,
+  {
+    payload: MonolithGenerateReferencesInput,
+    success: MonolithGenerateReferencesResult,
+    error: Schema.Union([MonolithAnalyzerRequestError, EnvironmentAuthorizationError]),
+  },
+);
+const WsProjectsMonolithAnalyzersRpc = Rpc.make(WS_METHODS.projectsMonolithAnalyzers, {
+  payload: MonolithGetInput,
+  success: MonolithAnalyzersResult,
+  error: Schema.Union([MonolithAnalyzerRequestError, EnvironmentAuthorizationError]),
+});
+const WsProjectsMonolithCheckFileRpc = Rpc.make(WS_METHODS.projectsMonolithCheckFile, {
+  payload: MonolithCheckFileInput,
+  success: MonolithCheckFileResult,
+  error: Schema.Union([MonolithAnalyzerRequestError, EnvironmentAuthorizationError]),
+});
+
 const WsProjectsMonolithGetRpc = Rpc.make(WS_METHODS.projectsMonolithGet, {
   payload: MonolithGetInput,
   success: MonolithSnapshot,
@@ -1915,6 +1944,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsMonolithInitializeRpc,
   WsProjectsMonolithDiscoverRpc,
   WsProjectsMonolithSaveRpc,
+  WsProjectsMonolithAnalyzersRpc,
+  WsProjectsMonolithCheckFileRpc,
+  WsProjectsMonolithGenerateReferencesRpc,
   WsProjectsListEntriesRpc,
   WsProjectsReadFileRpc,
   WsProjectsSearchContentsRpc,

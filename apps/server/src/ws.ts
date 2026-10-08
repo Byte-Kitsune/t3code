@@ -1,3 +1,6 @@
+import * as SymfonyReferenceService from "./project/SymfonyReferenceService.ts";
+import * as MonolithAnalyzerService from "./project/MonolithAnalyzerService.ts";
+import { MonolithAnalyzerRequestError } from "@t3tools/contracts";
 import { MonolithRequestError } from "@t3tools/contracts";
 import * as MonolithService from "./project/MonolithService.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
@@ -1203,6 +1206,8 @@ const layerWsRpc = (
       const projectStore = yield* ProjectStore.ProjectStoreV2;
       const projectService = yield* ProjectService.ProjectService;
       const monolithService = yield* MonolithService.MonolithService;
+      const monolithAnalyzers = yield* MonolithAnalyzerService.MonolithAnalyzerService;
+      const symfonyReferences = yield* SymfonyReferenceService.SymfonyReferenceService;
       const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
 
@@ -2630,6 +2635,37 @@ const layerWsRpc = (
                 }),
             ),
           ),
+        [WS_METHODS.projectsMonolithGenerateReferences]: (input) =>
+          symfonyReferences.generate(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new MonolithAnalyzerRequestError({
+                  operation: "references",
+                  cwd: input.cwd,
+                  cause,
+                }),
+            ),
+          ),
+        [WS_METHODS.projectsMonolithAnalyzers]: (input) =>
+          monolithAnalyzers.discover(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new MonolithAnalyzerRequestError({
+                  operation: "discover",
+                  cwd: input.cwd,
+                  cause,
+                }),
+            ),
+          ),
+        [WS_METHODS.projectsMonolithCheckFile]: (input) =>
+          monolithAnalyzers
+            .checkFile(input)
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new MonolithAnalyzerRequestError({ operation: "check", cwd: input.cwd, cause }),
+              ),
+            ),
         [WS_METHODS.projectsMonolithGet]: (input) =>
           monolithService
             .get({ ...input, initialize: false })
