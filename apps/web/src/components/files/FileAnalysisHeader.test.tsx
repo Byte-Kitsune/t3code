@@ -9,6 +9,7 @@ const initial: Check = {
   canRun: false,
   status: "idle",
   result: null,
+  error: null,
   diagnostics: [],
 };
 

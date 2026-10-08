@@ -49,6 +49,7 @@ export class MonolithAnalyzerService extends Context.Service<
       readonly cwd: string;
       readonly areaId: string;
       readonly paths: readonly string[];
+      readonly onProgress?: (message: string) => Effect.Effect<void>;
       readonly snapshot?: { readonly key: string; readonly paths: readonly string[] };
     }) => Effect.Effect<
       readonly { readonly path: string; readonly result: MonolithCheckFileResult }[],
@@ -77,7 +78,6 @@ const make = Effect.gen(function* () {
   const discovery = yield* AnalyzerDiscoveryService.AnalyzerDiscoveryService;
   const execution = yield* AnalyzerExecution.AnalyzerExecution;
   const phpInsights = yield* PhpInsightsExecution.PhpInsightsExecution;
-  const backgroundChecks = yield* Semaphore.make(1);
   const validatedSnapshots = new Map<
     string,
     {
@@ -103,29 +103,40 @@ const make = Effect.gen(function* () {
       error: PhpInsightsExecution.PhpInsightsExecutionError;
     }
   >();
-  const workspaces = new Map<
+  const areas = new Map<
     string,
-    { foreground: Semaphore.Semaphore; pending: number; idle: Deferred.Deferred<void> }
+    {
+      background: Semaphore.Semaphore;
+      foreground: Semaphore.Semaphore;
+      pending: number;
+      idle: Deferred.Deferred<void>;
+    }
   >();
-  const workspacePriority = (cwd: string) => {
-    const key = path.resolve(cwd);
-    let priority = workspaces.get(key);
+  const areaPriority = (cwd: string, areaId: string | null) => {
+    const key = `${path.resolve(cwd)}\0${areaId ?? ""}`;
+    let priority = areas.get(key);
     if (!priority) {
       priority = {
+        background: Semaphore.makeUnsafe(1),
         foreground: Semaphore.makeUnsafe(1),
         pending: 0,
         idle: Deferred.makeUnsafe<void>(),
       };
-      workspaces.set(key, priority);
+      areas.set(key, priority);
     }
     return priority;
   };
   // Give queued and running opened-file checks the next native operation.
   // An existing process finishes normally: canceling Compose exec would not
   // reliably stop its owned process inside the container.
-  const waitForOpenedFiles = (cwd: string) =>
+  const waitForOpenedFiles = (
+    cwd: string,
+    areaId: string,
+    onProgress?: (message: string) => Effect.Effect<void>,
+  ) =>
     Effect.gen(function* () {
-      const priority = workspacePriority(cwd);
+      const priority = areaPriority(cwd, areaId);
+      if (priority.pending > 0 && onProgress) yield* onProgress("Waiting for opened-file checks");
       while (priority.pending > 0) yield* Deferred.await(priority.idle);
     });
   const discover: MonolithAnalyzerService["Service"]["discover"] = Effect.fn(
@@ -152,6 +163,7 @@ const make = Effect.gen(function* () {
     input: MonolithCheckFileInput,
     indexPaths?: readonly string[],
     indexSnapshot?: { readonly key: string; readonly paths: readonly string[] },
+    onProgress?: (message: string) => Effect.Effect<void>,
   ) {
     const root = yield* fs
       .realPath(path.resolve(input.cwd))
@@ -326,8 +338,13 @@ const make = Effect.gen(function* () {
               : contents,
             batch = indexPaths !== undefined,
             formatPaths?: readonly string[],
+            phase = `${tool === "mago" ? "Mago" : tool} ${operation}`,
           ) =>
-            (indexPaths === undefined ? Effect.void : waitForOpenedFiles(input.cwd)).pipe(
+            (indexPaths === undefined
+              ? Effect.void
+              : waitForOpenedFiles(root, area.id, onProgress)
+            ).pipe(
+              Effect.andThen(() => onProgress?.(phase) ?? Effect.void),
               Effect.andThen(
                 execution.run({
                   tool,
@@ -391,13 +408,14 @@ const make = Effect.gen(function* () {
               : formatChunks.length
                 ? yield* Effect.forEach(
                     formatChunks,
-                    (files) =>
+                    (files, chunkIndex) =>
                       execute(
                         files[0]!,
                         indexedSources.get(path.relative(root, files[0]!).split(path.sep).join("/"))
                           ?.contents ?? contents,
                         true,
                         files,
+                        `Mago format chunk ${chunkIndex + 1}/${formatChunks.length}`,
                       ),
                     { concurrency: 2 },
                   )
@@ -507,43 +525,46 @@ const make = Effect.gen(function* () {
               installation.scripts.find(
                 (script) => script.operation === "analyze" && script.configPath !== undefined,
               )?.configPath ?? installation.configPath;
-            if (indexPaths !== undefined) yield* waitForOpenedFiles(input.cwd);
+            if (indexPaths !== undefined) yield* waitForOpenedFiles(root, area.id, onProgress);
             const insightCacheKey = `${root}\0${area.id}\0${/\.php$/i.test(file) ? "php" : "security"}`;
             const cachedInsightFailure =
               indexSnapshot === undefined ? undefined : insightFailures.get(insightCacheKey);
             const analyzed =
               cachedInsightFailure !== undefined && cachedInsightFailure.key === indexSnapshot?.key
                 ? Result.fail(cachedInsightFailure.error)
-                : yield* phpInsights
-                    .run({
-                      threads: indexPaths === undefined ? 2 : 1,
-                      command: path.resolve(root, installation.binaryPath),
-                      cwd: path.resolve(root, installation.workingDirectory),
-                      workspaceRoot: root,
-                      areaPath: area.path,
-                      filePath: file,
-                      relativePath: input.path,
-                      ...(indexPaths === undefined ? {} : { indexPaths }),
-                      ...(indexSnapshot === undefined ? {} : { snapshot: indexSnapshot }),
-                      autoloadPaths,
-                      ...(runtime ? { runtime } : {}),
-                      ...(configPath ? { configPath: path.resolve(root, configPath) } : {}),
-                      ...(reference && (runtime || reference.referenceAvailable)
-                        ? { referencePath: path.resolve(root, reference.referencePath) }
-                        : {}),
-                      ...(configuredArea?.commentMarkers === undefined
-                        ? {}
-                        : { commentMarkers: configuredArea.commentMarkers }),
-                      ...(snapshot.config.areas.find((candidate) => candidate.id === area.id)
-                        ?.entrypointPaths
-                        ? {
-                            entrypointPaths: snapshot.config.areas.find(
-                              (candidate) => candidate.id === area.id,
-                            )!.entrypointPaths!,
-                          }
-                        : {}),
-                    })
-                    .pipe(Effect.result);
+                : yield* (onProgress?.("PHP insights") ?? Effect.void).pipe(
+                    Effect.andThen(
+                      phpInsights.run({
+                        threads: indexPaths === undefined ? 2 : 1,
+                        command: path.resolve(root, installation.binaryPath),
+                        cwd: path.resolve(root, installation.workingDirectory),
+                        workspaceRoot: root,
+                        areaPath: area.path,
+                        filePath: file,
+                        relativePath: input.path,
+                        ...(indexPaths === undefined ? {} : { indexPaths }),
+                        ...(indexSnapshot === undefined ? {} : { snapshot: indexSnapshot }),
+                        autoloadPaths,
+                        ...(runtime ? { runtime } : {}),
+                        ...(configPath ? { configPath: path.resolve(root, configPath) } : {}),
+                        ...(reference && (runtime || reference.referenceAvailable)
+                          ? { referencePath: path.resolve(root, reference.referencePath) }
+                          : {}),
+                        ...(configuredArea?.commentMarkers === undefined
+                          ? {}
+                          : { commentMarkers: configuredArea.commentMarkers }),
+                        ...(snapshot.config.areas.find((candidate) => candidate.id === area.id)
+                          ?.entrypointPaths
+                          ? {
+                              entrypointPaths: snapshot.config.areas.find(
+                                (candidate) => candidate.id === area.id,
+                              )!.entrypointPaths!,
+                            }
+                          : {}),
+                      }),
+                    ),
+                    Effect.result,
+                  );
             if (
               indexSnapshot !== undefined &&
               analyzed._tag === "Failure" &&
@@ -787,13 +808,14 @@ const make = Effect.gen(function* () {
   return MonolithAnalyzerService.of({
     discover,
     indexArea: (input) =>
-      backgroundChecks.withPermits(1)(
+      areaPriority(input.cwd, input.areaId).background.withPermits(1)(
         Effect.gen(function* () {
           if (input.paths.length === 0) return [];
           const result = yield* checkFile(
             { cwd: input.cwd, path: input.paths[0]! },
             input.paths,
             input.snapshot,
+            input.onProgress,
           );
           if (result.areaId !== input.areaId || !("indexedFiles" in result))
             return yield* new MonolithAnalyzerError({ operation: "check", reason: "unsafe_path" });
@@ -807,21 +829,33 @@ const make = Effect.gen(function* () {
         ),
       ),
     checkFile: (input) =>
-      Effect.acquireUseRelease(
-        Effect.sync(() => {
-          const priority = workspacePriority(input.cwd);
-          if (priority.pending++ === 0) priority.idle = Deferred.makeUnsafe<void>();
-          return priority;
-        }),
-        (priority) => priority.foreground.withPermits(1)(checkFile(input)),
-        (priority) =>
-          Effect.suspend(() => {
-            priority.pending--;
-            return priority.pending === 0
-              ? Deferred.succeed(priority.idle, undefined)
-              : Effect.void;
+      Effect.gen(function* () {
+        const root = yield* fs.realPath(path.resolve(input.cwd));
+        const snapshot = yield* monolith
+          .get({ cwd: root, initialize: false })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new MonolithAnalyzerError({ operation: "check", reason: "configuration", cause }),
+            ),
+          );
+        const area = matchMonolithArea({ path: input.path }, snapshot.config.areas);
+        return yield* Effect.acquireUseRelease(
+          Effect.sync(() => {
+            const priority = areaPriority(root, area?.id ?? null);
+            if (priority.pending++ === 0) priority.idle = Deferred.makeUnsafe<void>();
+            return priority;
           }),
-      ).pipe(
+          (priority) => priority.foreground.withPermits(1)(checkFile(input)),
+          (priority) =>
+            Effect.suspend(() => {
+              priority.pending--;
+              return priority.pending === 0
+                ? Deferred.succeed(priority.idle, undefined)
+                : Effect.void;
+            }),
+        );
+      }).pipe(
         Effect.mapError((cause) =>
           isAnalyzerError(cause)
             ? cause

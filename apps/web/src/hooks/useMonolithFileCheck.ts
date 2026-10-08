@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   AuthFilesystemReadScope,
   type EnvironmentId,
@@ -19,6 +20,7 @@ type CheckState = {
   sourceKey: string;
   status: "checked" | "failed" | "stale";
   result?: MonolithCheckFileResult;
+  error?: string;
 };
 
 const EMPTY_DIAGNOSTICS: MonolithCheckFileResult["diagnostics"] = [];
@@ -70,7 +72,19 @@ export function useMonolithFileCheck(input: {
     void inFlight.current.response.then((response) => {
       if (!active) return;
       if (response._tag === "Failure") {
-        setState({ key, sourceKey, status: "failed" });
+        const failure = squashAtomCommandFailure(response);
+        setState((previous) => ({
+          key,
+          sourceKey,
+          status: "failed",
+          error:
+            failure instanceof Error
+              ? failure.message
+              : "File checks failed. No error details were returned.",
+          ...(previous?.sourceKey === sourceKey && previous.result
+            ? { result: previous.result }
+            : {}),
+        }));
       } else if (response.value.revision !== revision) {
         // An external write during the run invalidates line locations. Wait for
         // the file query's next revision instead of labeling the old source.
@@ -103,7 +117,7 @@ export function useMonolithFileCheck(input: {
   // A tool/dependency refresh can keep results for identical source bytes. A
   // different file or draft must immediately lose the old line locations.
   const result =
-    accessible && state?.sourceKey === sourceKey && state.status === "checked"
+    accessible && state?.sourceKey === sourceKey && state.status !== "stale"
       ? state.result
       : undefined;
   const diagnostics = useMemo(
@@ -122,6 +136,7 @@ export function useMonolithFileCheck(input: {
         : ("unsaved" as const)
       : (current?.status ?? (eligible ? ("checking" as const) : ("idle" as const))),
     result: result ?? null,
+    error: current?.error ?? null,
     diagnostics,
   };
 }

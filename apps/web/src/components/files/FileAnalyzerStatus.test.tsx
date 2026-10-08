@@ -17,6 +17,7 @@ describe("file-level analyzer status", () => {
       supported: true,
       canRun: true,
       status: "checked",
+      error: null,
       result: {
         areaId: "ui",
         revision: "saved",

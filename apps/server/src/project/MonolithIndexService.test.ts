@@ -591,6 +591,9 @@ it.effect(
         const initial = yield* service.index({ cwd: root });
         expect(initial.areas[0]?.status).toBe("indexing");
         yield* Deferred.await(started);
+        expect((yield* service.status({ cwd: root })).areas[0]?.message).toBe(
+          "Checking batch 1 of 1: mago analyze",
+        );
         const first = yield* service
           .checkFileCached({ cwd: root, path: "api/src/Demo.php" })
           .pipe(Effect.forkChild);
@@ -617,6 +620,7 @@ it.effect(
             (input) =>
               Effect.gen(function* () {
                 calls++;
+                yield* input.onProgress?.("mago analyze") ?? Effect.void;
                 yield* Deferred.succeed(started, undefined);
                 yield* Deferred.await(release);
                 return yield* batch(input);

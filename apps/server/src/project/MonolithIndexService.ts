@@ -530,7 +530,26 @@ const make = Effect.gen(function* () {
             .join(" "),
         });
         const results = yield* analyzer
-          .indexArea({ cwd: root, areaId: area.id, paths, snapshot: analysisSnapshot })
+          .indexArea({
+            cwd: root,
+            areaId: area.id,
+            paths,
+            snapshot: analysisSnapshot,
+            onProgress: (phase) =>
+              Effect.sync(() => {
+                statuses.set(key, {
+                  areaId: area.id,
+                  status: "indexing",
+                  fileCount: before.files.length,
+                  message: [
+                    `Checking batch ${index + 1} of ${batches.length}: ${phase}`,
+                    skippedSourceSummary(before.skippedSources).message,
+                  ]
+                    .filter(Boolean)
+                    .join(" "),
+                });
+              }),
+          })
           .pipe(
             Effect.mapError(
               (cause) => new MonolithIndexError({ operation: "index", reason: "analysis", cause }),

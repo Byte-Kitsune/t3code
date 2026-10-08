@@ -495,8 +495,17 @@ it.effect("bounds formatter batches while retaining all files for analyze and gu
     const paths = Array.from({ length: 129 }, (_, index) => `app/src/File${index}.php`);
     for (const source of paths) yield* write(root, source, "<?php class Test {}\n");
     const checks: AnalyzerExecution.AnalyzerExecutionInput[] = [];
+    const progress: string[] = [];
     yield* Effect.flatMap(MonolithAnalyzerService.MonolithAnalyzerService, (service) =>
-      service.indexArea({ cwd: root, areaId: "backend", paths }),
+      service.indexArea({
+        cwd: root,
+        areaId: "backend",
+        paths,
+        onProgress: (message) =>
+          Effect.sync(() => {
+            progress.push(message);
+          }),
+      }),
     ).pipe(
       Effect.provide(
         serviceLayer((input) => {
@@ -505,6 +514,12 @@ it.effect("bounds formatter batches while retaining all files for analyze and gu
         }),
       ),
     );
+    expect(progress).toEqual([
+      "Mago format chunk 1/2",
+      "Mago format chunk 2/2",
+      "Mago analyze",
+      "Mago guard",
+    ]);
     const format = checks.filter((check) => check.operation === "format");
     expect(format.map((check) => check.filePaths?.length)).toEqual([128, 1]);
     expect(
@@ -524,12 +539,17 @@ it.effect("indexes PHP files with one analyze/guard and one shared companion run
     yield* write(root, "app/src/Other.php", "<?php class Other {}");
     const checks: AnalyzerExecution.AnalyzerExecutionInput[] = [];
     const companions: PhpInsightsExecution.PhpInsightsInput[] = [];
+    const progress: string[] = [];
     const result = yield* Effect.flatMap(
       MonolithAnalyzerService.MonolithAnalyzerService,
       (service) =>
         service.indexArea({
           cwd: root,
           areaId: "backend",
+          onProgress: (message) =>
+            Effect.sync(() => {
+              progress.push(message);
+            }),
           paths: ["app/src/Test.php", "app/src/Other.php"],
           snapshot: { key: "shared-snapshot", paths: ["app/src/Test.php", "app/src/Other.php"] },
         }),
@@ -553,6 +573,12 @@ it.effect("indexes PHP files with one analyze/guard and one shared companion run
         ),
       ),
     );
+    expect(progress).toEqual([
+      "Mago format chunk 1/1",
+      "Mago analyze",
+      "Mago guard",
+      "PHP insights",
+    ]);
     expect(checks.map((input) => input.operation)).toEqual(["format", "analyze", "guard"]);
     expect(checks.every((input) => input.filePaths?.length === 2)).toBe(true);
     expect(companions).toHaveLength(1);
@@ -788,6 +814,92 @@ it.effect("reserves opened-file capacity while background batches are blocked an
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+it.effect("a blocked area's batch does not prevent another area from indexing", () =>
+  Effect.gen(function* () {
+    const root = yield* setup;
+    yield* write(root, "other/composer.json", '{"require-dev":{"carthage-software/mago":"*"}}');
+    yield* write(root, "other/vendor/bin/mago", "fixture");
+    yield* write(root, "other/src/Test.php", "<?php class Other {}\n");
+    const started = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    yield* Effect.gen(function* () {
+      const service = yield* MonolithAnalyzerService.MonolithAnalyzerService;
+      const first = yield* service
+        .indexArea({
+          cwd: root,
+          areaId: "php:app",
+          paths: ["app/src/Test.php"],
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(started);
+      const other = yield* service.indexArea({
+        cwd: root,
+        areaId: "php:other",
+        paths: ["other/src/Test.php"],
+      });
+      expect(other[0]?.result.runs.map((run) => run.status)).toEqual([
+        "passed",
+        "passed",
+        "passed",
+      ]);
+      yield* Deferred.succeed(release, undefined);
+      expect((yield* Fiber.join(first))[0]?.path).toBe("app/src/Test.php");
+    }).pipe(
+      Effect.provide(
+        serviceLayer(
+          Effect.fnUntraced(function* (input) {
+            if (input.filePath.endsWith("/app/src/Test.php") && input.operation === "format") {
+              yield* Deferred.succeed(started, undefined);
+              yield* Deferred.await(release);
+            }
+            return { diagnostics: [], exitCode: 0, status: "passed" as const };
+          }),
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("a long opened-file check does not pause another area's batches or opened files", () =>
+  Effect.gen(function* () {
+    const root = yield* setup;
+    yield* write(root, "other/composer.json", '{"require-dev":{"carthage-software/mago":"*"}}');
+    yield* write(root, "other/vendor/bin/mago", "fixture");
+    yield* write(root, "other/src/Test.php", "<?php class Other {}\n");
+    const started = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    yield* Effect.gen(function* () {
+      const service = yield* MonolithAnalyzerService.MonolithAnalyzerService;
+      const first = yield* service
+        .checkFile({ cwd: root, path: "app/src/Test.php" })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(started);
+      const batch = yield* service.indexArea({
+        cwd: root,
+        areaId: "php:other",
+        paths: ["other/src/Test.php"],
+      });
+      expect(batch[0]?.result.runs).toHaveLength(3);
+      const opened = yield* service.checkFile({ cwd: root, path: "other/src/Test.php" });
+      expect(opened.runs).toHaveLength(3);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(first);
+    }).pipe(
+      Effect.provide(
+        serviceLayer(
+          Effect.fnUntraced(function* (input) {
+            if (input.filePath.endsWith("/app/src/Test.php") && input.operation === "format") {
+              yield* Deferred.succeed(started, undefined);
+              yield* Deferred.await(release);
+            }
+            return { diagnostics: [], exitCode: 0, status: "passed" as const };
+          }),
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 it.effect("pauses subsequent background phases until an opened file has completed", () =>
   Effect.gen(function* () {
     const root = yield* setup;
@@ -797,6 +909,8 @@ it.effect("pauses subsequent background phases until an opened file has complete
     const releaseBackground = yield* Deferred.make<void>();
     const releaseForeground = yield* Deferred.make<void>();
     const backgroundReleased = yield* Deferred.make<void>();
+    const waiting = yield* Deferred.make<void>();
+    const progress: string[] = [];
     const order: string[] = [];
     yield* Effect.gen(function* () {
       const service = yield* MonolithAnalyzerService.MonolithAnalyzerService;
@@ -805,6 +919,12 @@ it.effect("pauses subsequent background phases until an opened file has complete
           cwd: root,
           areaId: "php:app",
           paths: ["app/src/Test.php"],
+          onProgress: (message) =>
+            Effect.gen(function* () {
+              progress.push(message);
+              if (message === "Waiting for opened-file checks")
+                yield* Deferred.succeed(waiting, undefined);
+            }),
         })
         .pipe(Effect.forkChild);
       yield* Deferred.await(backgroundStarted);
@@ -814,9 +934,17 @@ it.effect("pauses subsequent background phases until an opened file has complete
       yield* Deferred.await(foregroundStarted);
       yield* Deferred.succeed(releaseBackground, undefined);
       yield* Deferred.await(backgroundReleased);
+      yield* Deferred.await(waiting);
+      expect(progress).toEqual(["Mago format chunk 1/1", "Waiting for opened-file checks"]);
       yield* Deferred.succeed(releaseForeground, undefined);
       expect((yield* Fiber.join(opened)).runs).toHaveLength(3);
       expect((yield* Fiber.join(background))[0]?.result.runs).toHaveLength(3);
+      expect(progress).toEqual([
+        "Mago format chunk 1/1",
+        "Waiting for opened-file checks",
+        "Mago analyze",
+        "Mago guard",
+      ]);
       expect(order).toEqual([
         "background:format",
         "foreground:format",

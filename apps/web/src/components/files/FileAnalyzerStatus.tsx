@@ -17,7 +17,7 @@ export function FileAnalyzerStatus({
       : check.status === "checking"
         ? "Checking saved file…"
         : check.status === "failed"
-          ? "File checks failed."
+          ? (check.error ?? "File checks failed.")
           : check.status === "stale"
             ? "File changed during checks. Findings are hidden until the saved file is refreshed."
             : check.result?.runs.length === 0
@@ -32,7 +32,7 @@ export function FileAnalyzerStatus({
         </span>
       </summary>
       <div className="max-h-40 space-y-1 overflow-auto px-3 pb-2">
-        {text ? <p>{text}</p> : null}
+        {text ? <p className="whitespace-pre-wrap break-words">{text}</p> : null}
         {check.result?.runs.map((run) => (
           <p key={`${run.tool}:${run.operation}`}>
             {run.tool} {run.operation}:{" "}

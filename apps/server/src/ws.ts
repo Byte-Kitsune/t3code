@@ -2686,14 +2686,17 @@ const layerWsRpc = (
               ),
             ),
         [WS_METHODS.projectsMonolithCheckFile]: (input) =>
-          monolithIndex
-            .checkFileCached(input)
-            .pipe(
-              Effect.mapError(
-                (cause) =>
-                  new MonolithAnalyzerRequestError({ operation: "check", cwd: input.cwd, cause }),
-              ),
+          monolithIndex.checkFileCached(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new MonolithAnalyzerRequestError({
+                  operation: "check",
+                  cwd: input.cwd,
+                  cause,
+                  detail: cause.message,
+                }),
             ),
+          ),
         [WS_METHODS.projectsMonolithReviewStart]: (input) =>
           monolithReview
             .start(input)

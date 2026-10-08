@@ -1,4 +1,10 @@
-import { EnvironmentId, type MonolithCheckFileResult } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  MonolithAnalyzerRequestError,
+  type MonolithCheckFileResult,
+} from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
+import * as Schema from "effect/Schema";
 import { act, useLayoutEffect } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -41,7 +47,11 @@ const base = {
 };
 let latest: ReturnType<typeof useMonolithFileCheck> | undefined;
 let renderer: ReactTestRenderer | undefined;
-let pending: ((response: { _tag: "Success"; value: MonolithCheckFileResult }) => void)[];
+let pending: ((
+  response:
+    | { _tag: "Success"; value: MonolithCheckFileResult }
+    | { _tag: "Failure"; cause: Cause.Cause<MonolithAnalyzerRequestError> },
+) => void)[];
 
 function Probe(props: Parameters<typeof useMonolithFileCheck>[0]) {
   const value = useMonolithFileCheck(props);
@@ -107,6 +117,34 @@ afterEach(() => {
 });
 
 describe("automatic saved-file checks", () => {
+  it("exposes request failure details and preserves findings for unchanged source", async () => {
+    await mount();
+    await act(async () => pending[0]?.(success(base.contents)));
+    const previous = latest?.result;
+    doubles.toolsRevision++;
+    await update(base);
+    const detail = "PHP file insights could not complete (process). Docker exited with code 137.";
+    const error = new MonolithAnalyzerRequestError({
+      operation: "check",
+      cwd: base.cwd,
+      cause: new Error(detail),
+      detail,
+    });
+    const transport = Schema.fromJsonString(MonolithAnalyzerRequestError);
+    const received = Schema.decodeSync(transport)(Schema.encodeSync(transport)(error));
+    await act(async () => pending[1]?.({ _tag: "Failure", cause: Cause.fail(received) }));
+    expect(latest?.status).toBe("failed");
+    expect(latest?.error).toBe(detail);
+    expect(latest?.result).toBe(previous);
+    expect(latest?.diagnostics).toHaveLength(1);
+    await update({ ...base, onStale: () => {} });
+    expect(doubles.check).toHaveBeenCalledTimes(2);
+    await update({ ...base, contents: "<?php\nchanged();" });
+    expect(latest?.error).toBeNull();
+    expect(latest?.result).toBeNull();
+    expect(latest?.status).toBe("checking");
+  });
+
   it("hides query budgets and entry chains immediately when the saved revision changes", async () => {
     await mount();
     const response = success(base.contents);

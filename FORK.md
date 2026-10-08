@@ -57,6 +57,11 @@ per command locally and in Docker, matching the exporter's debug-view input limi
 ordinary file-check command limits remain unchanged. Shared indexing snapshots
 accept PHP and React areas while rejecting files from other areas; background
 indexing failures retain the analyzer's error reason in their status message.
+Background and opened-file queues are scoped to each area, so a long PHP batch
+or file check does not serialize unrelated areas. Background indexing retains
+its global two-job budget and yields to opened-file requests in the same area.
+Batch status includes the current analyzer phase; opened-file failures expose
+the server's diagnostic message instead of only changing the status label.
 
 React areas support Biome, ESLint, and dependency-cruiser, including installed
 workspace binaries. Discovery extracts supported analyzer commands from package
