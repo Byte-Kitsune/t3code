@@ -16,10 +16,20 @@ function t3QueryInsights(\Mago\Sdk\Analyzer\AfterAnalysisContext $context, array
     }
     if (is_array($input['indexPaths'] ?? null)) {
         $files = [];
-        $batch = method_exists(\ByteKitsune\MagoDoctrineQueryBudget\QueryBudgetExtension::class, 'inspectFiles')
-            ? \ByteKitsune\MagoDoctrineQueryBudget\QueryBudgetExtension::inspectFiles(
+        $batch = [];
+        // Older extensions bound selectors to 2,000. Each chunk retains the same
+        // complete Mago snapshot; never limit native analysis to report paths.
+        if (method_exists(\ByteKitsune\MagoDoctrineQueryBudget\QueryBudgetExtension::class, 'inspectSnapshot')) {
+            $batch = \ByteKitsune\MagoDoctrineQueryBudget\QueryBudgetExtension::inspectSnapshot(
                 $context->analysis, array_column($input['indexPaths'], 'areaRelativePath'), $bindings, $constructorBindings,
-            ) : null;
+            );
+        } elseif (method_exists(\ByteKitsune\MagoDoctrineQueryBudget\QueryBudgetExtension::class, 'inspectFiles')) {
+            foreach (array_chunk(array_column($input['indexPaths'], 'areaRelativePath'), 2000) as $paths) {
+                $batch += \ByteKitsune\MagoDoctrineQueryBudget\QueryBudgetExtension::inspectFiles(
+                    $context->analysis, $paths, $bindings, $constructorBindings,
+                );
+            }
+        }
         foreach ($input['indexPaths'] as $file) {
             $report = $batch[$file['areaRelativePath']] ?? \ByteKitsune\MagoDoctrineQueryBudget\QueryBudgetExtension::inspectFile(
                 $context->analysis, $file['areaRelativePath'], $bindings, $constructorBindings,

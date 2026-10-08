@@ -106,6 +106,22 @@ const encodeFingerprint = Schema.encodeSync(
 );
 export const isMonolithIndexError = Schema.is(MonolithIndexError);
 const skippedDirectories = new Set(["vendor", "node_modules", ".git", ".t3", ".cache", ".next"]);
+// These are React area outputs, not arbitrary source folders named "build" inside PHP projects.
+const reactOutputDirectories = new Set([
+  "build",
+  "dist",
+  "coverage",
+  "out",
+  ".output",
+  ".nuxt",
+  ".svelte-kit",
+]);
+const skippedSourceSummary = (files: readonly string[]) =>
+  files.length
+    ? {
+        message: `Skipped ${files.length} source ${files.length === 1 ? "file" : "files"} larger than 2 MiB during automatic indexing: ${files.slice(0, 3).join(", ")}${files.length > 3 ? ", …" : ""}. Other files remain available for automatic checks.`,
+      }
+    : {};
 
 export class MonolithIndexService extends Context.Service<
   MonolithIndexService,
@@ -140,6 +156,7 @@ const make = Effect.gen(function* () {
   const statuses = new Map<string, MonolithAreaIndexStatus>();
   const failedSignatures = new Map<string, string>();
   const memory = new Map<string, Cache>();
+  let analysisGeneration = 0;
   const digest = (contents: string) =>
     crypto.digest("SHA-256", new TextEncoder().encode(contents)).pipe(
       Effect.map(Hex.encode),
@@ -189,6 +206,7 @@ const make = Effect.gen(function* () {
     yield* safeDirectory(areaRoot);
     const records: [string, string][] = [];
     const files: string[] = [];
+    const skippedSources: string[] = [];
     const revisions = new Map<string, string>();
     const sizes = new Map<string, number>();
     const recorded = new Set<string>();
@@ -201,16 +219,22 @@ const make = Effect.gen(function* () {
       if (info.type !== "File") return;
       const relative = path.relative(root, absolute).split(path.sep).join("/");
       if (recorded.has(relative)) return;
-      if (info.size > (source ? MAX_SOURCE_FILE_BYTES : MAX_DEPENDENCY_FILE_BYTES))
+      const skippedSource = source && info.size > MAX_SOURCE_FILE_BYTES;
+      if (skippedSource) {
+        // Native full-project analysis can still consume this file as graph context.
+        // Keep its content hash even though it has no individual automatic result.
+        skippedSources.push(relative);
+      }
+      if ((!source || skippedSource) && info.size > MAX_DEPENDENCY_FILE_BYTES)
         return yield* new MonolithIndexError({
           operation: "index",
           reason: "limit",
-          limit: source ? "source_file_bytes" : "dependency_file_bytes",
+          limit: "dependency_file_bytes",
           path: relative.slice(0, 1024),
         });
       const contents = yield* fs.readFileString(absolute);
       const bytes = new TextEncoder().encode(contents).byteLength;
-      if (source && (sourceBytes += bytes) > MAX_SOURCE_BYTES)
+      if (source && !skippedSource && (sourceBytes += bytes) > MAX_SOURCE_BYTES)
         return yield* new MonolithIndexError({
           operation: "index",
           reason: "limit",
@@ -223,9 +247,12 @@ const make = Effect.gen(function* () {
           limit: "fingerprint_bytes",
         });
       const hash = yield* digest(contents);
-      records.push([relative, `${source ? "source" : "dependency"}:${hash}`]);
+      records.push([
+        relative,
+        `${skippedSource ? "skipped-source" : source ? "source" : "dependency"}:${hash}`,
+      ]);
       recorded.add(relative);
-      if (source) {
+      if (source && !skippedSource) {
         files.push(relative);
         revisions.set(relative, hash);
         sizes.set(relative, bytes);
@@ -246,6 +273,7 @@ const make = Effect.gen(function* () {
         if (info.type === "Directory") {
           if (
             !skippedDirectories.has(name) &&
+            !(area.kind === "react" && folder === areaRoot && reactOutputDirectories.has(name)) &&
             !["var/cache", "var/log"].includes(
               path.relative(areaRoot, absolute).split(path.sep).join("/"),
             )
@@ -334,6 +362,7 @@ const make = Effect.gen(function* () {
       files: files.toSorted(),
       revisions,
       sizes,
+      skippedSources: skippedSources.toSorted(),
     };
   });
   const cachePath = Effect.fnUntraced(function* (root: string, areaId: string) {
@@ -400,12 +429,14 @@ const make = Effect.gen(function* () {
         status: "ready" as const,
         fileCount: cache!.files.length,
         revision: cache!.signature,
+        ...skippedSourceSummary(before.skippedSources),
       };
     return {
       areaId: area.id,
       status: cache ? ("stale" as const) : ("idle" as const),
       fileCount: before.files.length,
       revision: before.signature,
+      ...skippedSourceSummary(before.skippedSources),
     };
   });
   const state = (root: string, area: MonolithArea) =>
@@ -454,10 +485,17 @@ const make = Effect.gen(function* () {
           status: "ready",
           fileCount: cached!.files.length,
           revision: before.signature,
+          ...skippedSourceSummary(before.skippedSources),
         });
         return;
       }
       const batches: string[][] = [];
+      // A single area snapshot is shared across batches. A fresh generation also
+      // makes explicit Reindex retry native tools when source hashes are unchanged.
+      const analysisSnapshot = {
+        key: `${before.signature}:${++analysisGeneration}`,
+        paths: before.files,
+      };
       let batch: string[] = [];
       let bytes = 0;
       for (const file of before.files) {
@@ -480,10 +518,15 @@ const make = Effect.gen(function* () {
           areaId: area.id,
           status: "indexing",
           fileCount: before.files.length,
-          message: `Checking batch ${index + 1} of ${batches.length}.`,
+          message: [
+            `Checking batch ${index + 1} of ${batches.length}.`,
+            skippedSourceSummary(before.skippedSources).message,
+          ]
+            .filter(Boolean)
+            .join(" "),
         });
         const results = yield* analyzer
-          .indexArea({ cwd: root, areaId: area.id, paths })
+          .indexArea({ cwd: root, areaId: area.id, paths, snapshot: analysisSnapshot })
           .pipe(
             Effect.mapError(
               (cause) => new MonolithIndexError({ operation: "index", reason: "analysis", cause }),
@@ -530,6 +573,7 @@ const make = Effect.gen(function* () {
         status: "ready",
         fileCount: files.length,
         revision: after.signature,
+        ...skippedSourceSummary(after.skippedSources),
       });
     }).pipe(
       Effect.scoped,

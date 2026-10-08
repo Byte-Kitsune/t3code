@@ -25,6 +25,7 @@ export interface AnalyzerExecutionInput {
   readonly sourceTexts?: Readonly<Record<string, string>>;
   readonly runtime?: MonolithMagoDocker;
   readonly areaPath?: string;
+  readonly threads?: number;
 }
 
 export interface AnalyzerDiagnostic {
@@ -108,6 +109,8 @@ function severity(value: unknown): AnalyzerDiagnostic["severity"] {
   }
 }
 
+const requestedFileSets = new WeakMap<AnalyzerExecutionInput, ReadonlySet<string>>();
+
 function relativeFile(
   input: AnalyzerExecutionInput,
   reportedPath: string,
@@ -129,8 +132,12 @@ function relativeFile(
     return null;
   // PHP analysis and guard intentionally retain the complete project context, while
   // only diagnostics for the opened file are presented by this operation.
-  if (!(input.filePaths ?? [input.filePath]).some((file) => absolute === paths.resolve(file)))
-    return null;
+  let requested = requestedFileSets.get(input);
+  if (!requested) {
+    requested = new Set((input.filePaths ?? [input.filePath]).map((file) => paths.resolve(file)));
+    requestedFileSets.set(input, requested);
+  }
+  if (!requested.has(absolute)) return null;
   return relative.split(paths.sep).join("/");
 }
 
@@ -389,6 +396,8 @@ const make = Effect.gen(function* () {
       input.tool === "mago" ? input.operation !== "check" : input.operation === "check";
     if (
       !validPair ||
+      (input.threads !== undefined &&
+        (!Number.isInteger(input.threads) || input.threads < 1 || input.threads > 2)) ||
       (!input.runtime && !paths.isAbsolute(input.command)) ||
       (input.runtime !== undefined && (input.tool !== "mago" || input.areaPath === undefined)) ||
       !paths.isAbsolute(input.cwd) ||
@@ -470,6 +479,7 @@ const make = Effect.gen(function* () {
                   ...(input.filePaths ?? [input.filePath]),
                 ]
               : [
+                  ...(input.threads === undefined ? [] : ["--threads", String(input.threads)]),
                   ...(input.configPath ? ["--config", toolPath(input.configPath)] : []),
                   input.operation,
                   ...(input.operation === "format"

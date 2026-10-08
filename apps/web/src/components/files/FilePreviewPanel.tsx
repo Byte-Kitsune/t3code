@@ -1115,11 +1115,7 @@ export default function FilePreviewPanel({
     path: !isHostFile && !isMedia && !isPdf ? relativePath : null,
     contents: !isHostFile && !isMedia && !isPdf ? (file.data?.contents ?? null) : null,
     onStale: file.refresh,
-    persisted:
-      !file.isPending &&
-      !file.hasUnsavedChanges &&
-      !selectedFilePending &&
-      file.data?.truncated === false,
+    persisted: !file.hasUnsavedChanges && !selectedFilePending && file.data?.truncated === false,
   });
   const sourceContents = file.data?.contents ?? null;
   const queryMethods = fileCheck.result?.queryBudget?.methods;

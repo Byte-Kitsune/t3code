@@ -59,11 +59,9 @@ const batch = Effect.fnUntraced(function* (input: {
 });
 function serviceLayer(
   getAreas: () => readonly MonolithArea[],
-  indexArea: (input: {
-    cwd: string;
-    areaId: string;
-    paths: readonly string[];
-  }) => Effect.Effect<
+  indexArea: (
+    input: Parameters<MonolithAnalyzerService.MonolithAnalyzerService["Service"]["indexArea"]>[0],
+  ) => Effect.Effect<
     readonly { path: string; result: MonolithCheckFileResult }[],
     MonolithAnalyzerService.MonolithAnalyzerError,
     Crypto.Crypto | FileSystem.FileSystem | Path.Path
@@ -768,6 +766,35 @@ it.effect("does not write index caches through a linked .t3 directory", () =>
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+it.effect("gives explicit Reindex a fresh native snapshot even when content is unchanged", () =>
+  Effect.gen(function* () {
+    const root = yield* setup;
+    const keys: string[] = [];
+    yield* Effect.gen(function* () {
+      const service = yield* indexUse;
+      yield* service.index({ cwd: root });
+      yield* service.awaitIdle({ cwd: root });
+      yield* service.index({ cwd: root });
+      yield* service.awaitIdle({ cwd: root });
+      expect(keys).toHaveLength(1);
+      yield* service.index({ cwd: root, force: true });
+      yield* service.awaitIdle({ cwd: root });
+      expect(keys).toHaveLength(2);
+      expect(keys[1]).not.toBe(keys[0]);
+    }).pipe(
+      Effect.provide(
+        serviceLayer(
+          () => [php],
+          (input) => {
+            keys.push(input.snapshot!.key);
+            return batch(input).pipe(Effect.orDie);
+          },
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 it.effect(
   "indexes 20,001 PHP files in sequential bounded batches",
   () =>
@@ -779,6 +806,7 @@ it.effect(
         { concurrency: 64, discard: true },
       );
       const sizes: number[] = [];
+      const snapshotKeys = new Set<string>();
       let active = 0;
       yield* Effect.gen(function* () {
         const service = yield* indexUse;
@@ -787,6 +815,7 @@ it.effect(
         expect(sizes).toHaveLength(11);
         expect(sizes.reduce((sum, count) => sum + count, 0)).toBe(20001);
         expect(Math.max(...sizes)).toBeLessThanOrEqual(2000);
+        expect(snapshotKeys.size).toBe(1);
         expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("ready");
       }).pipe(
         Effect.provide(
@@ -797,6 +826,8 @@ it.effect(
                 expect(active).toBe(0);
                 active++;
                 sizes.push(input.paths.length);
+                expect(input.snapshot?.paths).toHaveLength(20001);
+                snapshotKeys.add(input.snapshot!.key);
                 const files = yield* batch(input);
                 active--;
                 return files;
@@ -849,38 +880,111 @@ it.effect(
   { timeout: 30000 },
 );
 
-it.effect("reports an oversized source precisely while other opened files remain usable", () =>
+it.effect("excludes React build outputs without hiding nested source or PHP build folders", () =>
   Effect.gen(function* () {
     const root = yield* setup;
-    yield* write(root, "api/src/Oversized.php", "x".repeat(2 * 1024 * 1024 + 1));
-    let calls = 0;
+    const react: MonolithArea = {
+      id: "frontend",
+      name: "Frontend",
+      path: "frontend",
+      kind: "react",
+    };
+    yield* write(root, "frontend/package.json", "{}");
+    yield* write(root, "frontend/src/App.tsx", "export const App = () => null;\n");
+    yield* write(root, "frontend/src/build/helper.ts", "export const helper = 1;\n");
+    for (const folder of ["build", "dist", "coverage", "out", ".output", ".nuxt", ".svelte-kit"])
+      yield* write(
+        root,
+        `frontend/${folder}/server/assets/server-build.js`,
+        "x".repeat(2 * 1024 * 1024 + 1),
+      );
+    yield* write(root, "api/build/RealSource.php", "<?php class RealSource {}\n");
+    const indexed = new Map<string, readonly string[]>();
     yield* Effect.gen(function* () {
       const service = yield* indexUse;
-      const opened = yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
-      expect(opened.revision).toBe(yield* hashFile(root, "api/src/Demo.php"));
+      yield* service.index({ cwd: root });
       yield* service.awaitIdle({ cwd: root });
-      const status = (yield* service.status({ cwd: root })).areas[0];
-      expect(status?.status).toBe("failed");
-      expect(status?.message).toContain("api/src/Oversized.php");
-      expect(status?.message).toContain("2 MiB");
-      expect(calls).toBe(0);
+      expect(indexed.get("frontend")).toEqual([
+        "frontend/package.json",
+        "frontend/src/App.tsx",
+        "frontend/src/build/helper.ts",
+      ]);
+      expect(indexed.get("api")).toContain("api/build/RealSource.php");
+      const initial = (yield* service.status({ cwd: root })).areas;
+      expect(initial.every((area) => area.status === "ready")).toBe(true);
+      const revision = initial.find((area) => area.areaId === "frontend")?.revision;
+      yield* write(
+        root,
+        "frontend/build/server/assets/server-build.js",
+        "another generated bundle",
+      );
       expect(
-        (yield* service.checkFileCached({ cwd: root, path: "api/src/Caller.php" })).revision,
-      ).toBe(yield* hashFile(root, "api/src/Caller.php"));
-      yield* service.awaitIdle({ cwd: root });
-      expect(calls).toBe(0);
+        (yield* service.status({ cwd: root })).areas.find((area) => area.areaId === "frontend")
+          ?.revision,
+      ).toBe(revision);
+      expect(
+        (yield* service.status({ cwd: root })).areas.find((area) => area.areaId === "frontend")
+          ?.status,
+      ).toBe("ready");
     }).pipe(
       Effect.provide(
         serviceLayer(
-          () => [php],
+          () => [php, react],
           (input) => {
-            calls++;
+            indexed.set(input.areaId, input.paths);
             return batch(input).pipe(Effect.orDie);
           },
         ),
       ),
     );
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "skips oversized sources, keeps other cached files usable and indexes files that shrink",
+  () =>
+    Effect.gen(function* () {
+      const root = yield* setup;
+      yield* write(root, "api/src/Oversized.php", "x".repeat(2 * 1024 * 1024 + 1));
+      let calls = 0;
+      yield* Effect.gen(function* () {
+        const service = yield* indexUse;
+        const opened = yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        expect(opened.revision).toBe(yield* hashFile(root, "api/src/Demo.php"));
+        yield* service.awaitIdle({ cwd: root });
+        const status = (yield* service.status({ cwd: root })).areas[0];
+        expect(status?.status).toBe("ready");
+        expect(status?.fileCount).toBe(2);
+        expect(status?.message).toContain("Skipped 1 source file");
+        expect(status?.message).toContain("api/src/Oversized.php");
+        expect(status?.message).toContain("2 MiB");
+        expect(calls).toBe(1);
+        expect(
+          (yield* service.checkFileCached({ cwd: root, path: "api/src/Caller.php" })).revision,
+        ).toBe(yield* hashFile(root, "api/src/Caller.php"));
+        yield* service.awaitIdle({ cwd: root });
+        expect(calls).toBe(1);
+        yield* write(root, "api/src/Oversized.php", "<?php class SmallEnough {}\n");
+        expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("stale");
+        yield* service.index({ cwd: root });
+        yield* service.awaitIdle({ cwd: root });
+        const updated = (yield* service.status({ cwd: root })).areas[0];
+        expect(updated?.status).toBe("ready");
+        expect(updated?.fileCount).toBe(3);
+        expect(updated?.message).toBeUndefined();
+        expect(calls).toBe(2);
+      }).pipe(
+        Effect.provide(
+          serviceLayer(
+            () => [php],
+            (input) => {
+              calls++;
+              return batch(input).pipe(Effect.orDie);
+            },
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect(

@@ -527,6 +527,7 @@ it.effect("indexes PHP files with one analyze/guard and one shared companion run
           cwd: root,
           areaId: "backend",
           paths: ["app/src/Test.php", "app/src/Other.php"],
+          snapshot: { key: "shared-snapshot", paths: ["app/src/Test.php", "app/src/Other.php"] },
         }),
     ).pipe(
       Effect.provide(
@@ -551,6 +552,11 @@ it.effect("indexes PHP files with one analyze/guard and one shared companion run
     expect(checks.map((input) => input.operation)).toEqual(["format", "analyze", "guard"]);
     expect(checks.every((input) => input.filePaths?.length === 2)).toBe(true);
     expect(companions).toHaveLength(1);
+    expect(companions[0]?.snapshot).toEqual({
+      key: "shared-snapshot",
+      paths: ["app/src/Test.php", "app/src/Other.php"],
+    });
+    expect(companions[0]?.threads).toBe(1);
     expect(result.map((item) => item.path)).toEqual(["app/src/Test.php", "app/src/Other.php"]);
     expect(
       result.every(
@@ -773,6 +779,303 @@ it.effect("reserves opened-file capacity while background batches are blocked an
             return { diagnostics: [], exitCode: 0, status: "passed" as const };
           }),
         ),
+      ),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("pauses subsequent background phases until an opened file has completed", () =>
+  Effect.gen(function* () {
+    const root = yield* setup;
+    yield* write(root, "app/src/Foreground.php", "<?php class Foreground {}\n");
+    const backgroundStarted = yield* Deferred.make<void>();
+    const foregroundStarted = yield* Deferred.make<void>();
+    const releaseBackground = yield* Deferred.make<void>();
+    const releaseForeground = yield* Deferred.make<void>();
+    const backgroundReleased = yield* Deferred.make<void>();
+    const order: string[] = [];
+    yield* Effect.gen(function* () {
+      const service = yield* MonolithAnalyzerService.MonolithAnalyzerService;
+      const background = yield* service
+        .indexArea({
+          cwd: root,
+          areaId: "php:app",
+          paths: ["app/src/Test.php"],
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(backgroundStarted);
+      const opened = yield* service
+        .checkFile({ cwd: root, path: "app/src/Foreground.php" })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(foregroundStarted);
+      yield* Deferred.succeed(releaseBackground, undefined);
+      yield* Deferred.await(backgroundReleased);
+      yield* Deferred.succeed(releaseForeground, undefined);
+      expect((yield* Fiber.join(opened)).runs).toHaveLength(3);
+      expect((yield* Fiber.join(background))[0]?.result.runs).toHaveLength(3);
+      expect(order).toEqual([
+        "background:format",
+        "foreground:format",
+        "foreground:analyze",
+        "foreground:guard",
+        "background:analyze",
+        "background:guard",
+      ]);
+    }).pipe(
+      Effect.provide(
+        serviceLayer(
+          Effect.fnUntraced(function* (input) {
+            const foreground = input.filePath.endsWith("/Foreground.php");
+            order.push(`${foreground ? "foreground" : "background"}:${input.operation}`);
+            if (input.operation === "format") {
+              if (foreground) {
+                yield* Deferred.succeed(foregroundStarted, undefined);
+                yield* Deferred.await(releaseForeground);
+              } else {
+                yield* Deferred.succeed(backgroundStarted, undefined);
+                yield* Deferred.await(releaseBackground);
+                yield* Deferred.succeed(backgroundReleased, undefined);
+              }
+            }
+            return { diagnostics: [], exitCode: 0, status: "passed" as const };
+          }),
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("an opened file in another workspace does not queue behind a long file check", () =>
+  Effect.gen(function* () {
+    const firstRoot = yield* setup;
+    const secondRoot = yield* setup;
+    const started = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    yield* Effect.gen(function* () {
+      const service = yield* MonolithAnalyzerService.MonolithAnalyzerService;
+      const first = yield* service
+        .checkFile({ cwd: firstRoot, path: "app/src/Test.php" })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(started);
+      const second = yield* service.checkFile({ cwd: secondRoot, path: "app/src/Test.php" });
+      expect(second.runs.map((run) => run.status)).toEqual(["passed", "passed", "passed"]);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(first);
+    }).pipe(
+      Effect.provide(
+        serviceLayer(
+          Effect.fnUntraced(function* (input) {
+            if (input.workspaceRoot === firstRoot && input.operation === "format") {
+              yield* Deferred.succeed(started, undefined);
+              yield* Deferred.await(release);
+            }
+            return { diagnostics: [], exitCode: 0, status: "passed" as const };
+          }),
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("releases background priority when an opened-file request is canceled", () =>
+  Effect.gen(function* () {
+    const root = yield* setup;
+    yield* write(root, "app/src/Foreground.php", "<?php class Foreground {}\n");
+    const backgroundStarted = yield* Deferred.make<void>();
+    const foregroundStarted = yield* Deferred.make<void>();
+    const releaseBackground = yield* Deferred.make<void>();
+    yield* Effect.gen(function* () {
+      const service = yield* MonolithAnalyzerService.MonolithAnalyzerService;
+      const background = yield* service
+        .indexArea({
+          cwd: root,
+          areaId: "php:app",
+          paths: ["app/src/Test.php"],
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(backgroundStarted);
+      const opened = yield* service
+        .checkFile({ cwd: root, path: "app/src/Foreground.php" })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(foregroundStarted);
+      yield* Fiber.interrupt(opened);
+      yield* Deferred.succeed(releaseBackground, undefined);
+      expect((yield* Fiber.join(background))[0]?.result.runs.map((run) => run.status)).toEqual([
+        "passed",
+        "passed",
+        "passed",
+      ]);
+    }).pipe(
+      Effect.provide(
+        serviceLayer(
+          Effect.fnUntraced(function* (input) {
+            if (input.operation === "format") {
+              if (input.filePath.endsWith("/Foreground.php")) {
+                yield* Deferred.succeed(foregroundStarted, undefined);
+                return yield* Effect.never;
+              } else {
+                yield* Deferred.succeed(backgroundStarted, undefined);
+                yield* Deferred.await(releaseBackground);
+              }
+            }
+            return { diagnostics: [], exitCode: 0, status: "passed" as const };
+          }),
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("reuses full-snapshot Mago analyze and guard reports across indexing batches", () =>
+  Effect.gen(function* () {
+    const root = yield* setup;
+    yield* write(root, "app/src/Other.php", "<?php class Other {}\n");
+    const paths = ["app/src/Test.php", "app/src/Other.php"];
+    const calls: AnalyzerExecution.AnalyzerExecutionInput[] = [];
+    const diagnostic = {
+      path: "app/src/Other.php",
+      line: 1,
+      severity: "error" as const,
+      message: "Invalid return type",
+      ruleId: "invalid-return",
+      tool: "mago" as const,
+      operation: "analyze" as const,
+    };
+    yield* Effect.gen(function* () {
+      const service = yield* MonolithAnalyzerService.MonolithAnalyzerService;
+      const batch = (source: string, key: string) =>
+        service.indexArea({
+          cwd: root,
+          areaId: "php:app",
+          paths: [source],
+          snapshot: { key, paths },
+        });
+      const first = yield* batch(paths[0]!, "snapshot-1");
+      const second = yield* batch(paths[1]!, "snapshot-1");
+      expect(first[0]?.result.diagnostics).toEqual([]);
+      expect(second[0]?.result.diagnostics).toEqual([diagnostic]);
+      expect(second[0]?.result.runs.find((run) => run.operation === "analyze")?.status).toBe(
+        "findings",
+      );
+      expect(calls.map((call) => call.operation)).toEqual(["format", "analyze", "guard", "format"]);
+      expect(
+        calls
+          .filter((call) => call.operation !== "format")
+          .every((call) => call.filePaths?.length === 2 && call.threads === 1),
+      ).toBe(true);
+      yield* batch(paths[0]!, "snapshot-2");
+      expect(calls.map((call) => call.operation)).toEqual([
+        "format",
+        "analyze",
+        "guard",
+        "format",
+        "format",
+        "analyze",
+        "guard",
+      ]);
+      yield* service.checkFile({ cwd: root, path: paths[0]! });
+      expect(calls.slice(-3).every((call) => call.threads === 2)).toBe(true);
+      expect(calls.slice(-3).map((call) => call.operation)).toEqual(["format", "analyze", "guard"]);
+    }).pipe(
+      Effect.provide(
+        serviceLayer((input) => {
+          calls.push(input);
+          return Effect.succeed({
+            diagnostics: input.operation === "analyze" ? [diagnostic] : [],
+            exitCode: 0,
+            status: input.operation === "analyze" ? ("findings" as const) : ("passed" as const),
+          });
+        }),
+      ),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("rejects a full snapshot that includes files outside its PHP area", () =>
+  Effect.gen(function* () {
+    const root = yield* setup;
+    const result = yield* Effect.flatMap(
+      MonolithAnalyzerService.MonolithAnalyzerService,
+      (service) =>
+        service
+          .indexArea({
+            cwd: root,
+            areaId: "php:app",
+            paths: ["app/src/Test.php"],
+            snapshot: { key: "unsafe", paths: ["app/src/Test.php", "../outside.php"] },
+          })
+          .pipe(Effect.result),
+    ).pipe(Effect.provide(serviceLayer(() => Effect.die("Must not execute unsafe snapshots"))));
+    expect(result._tag).toBe("Failure");
+    if (result._tag === "Failure") expect(result.failure.reason).toBe("unsafe_path");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("does not repeat failed PHP native processes for each unchanged snapshot batch", () =>
+  Effect.gen(function* () {
+    const root = yield* insightSetup;
+    yield* write(root, "app/src/Other.php", "<?php class Other {}\n");
+    const paths = ["app/src/Test.php", "app/src/Other.php"];
+    let insightCalls = 0;
+    yield* Effect.gen(function* () {
+      const service = yield* MonolithAnalyzerService.MonolithAnalyzerService;
+      const batch = (source: string, key: string) =>
+        service.indexArea({
+          cwd: root,
+          areaId: "backend",
+          paths: [source],
+          snapshot: { key, paths },
+        });
+      const first = yield* batch(paths[0]!, "failed-cycle-1");
+      const second = yield* batch(paths[1]!, "failed-cycle-1");
+      expect(first[0]?.result.queryBudget?.status).toBe("failed");
+      expect(second[0]?.result.queryBudget?.status).toBe("failed");
+      expect(insightCalls).toBe(1);
+      yield* batch(paths[0]!, "failed-cycle-2");
+      expect(insightCalls).toBe(2);
+      yield* batch(paths[1]!, "failed-cycle-2");
+      expect(insightCalls).toBe(2);
+      yield* service.checkFile({ cwd: root, path: paths[0]! });
+      expect(insightCalls).toBe(3);
+    }).pipe(
+      Effect.provide(
+        serviceLayer(passed, () => {
+          insightCalls++;
+          return Effect.fail(
+            new PhpInsightsExecution.PhpInsightsExecutionError({
+              stage: insightCalls === 1 ? "process" : "config",
+            }),
+          );
+        }),
+      ),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("retries file-specific PHP report failures in subsequent snapshot batches", () =>
+  Effect.gen(function* () {
+    const root = yield* insightSetup;
+    yield* write(root, "app/src/Other.php", "<?php class Other {}\n");
+    const paths = ["app/src/Test.php", "app/src/Other.php"];
+    let insightCalls = 0;
+    yield* Effect.gen(function* () {
+      const service = yield* MonolithAnalyzerService.MonolithAnalyzerService;
+      for (const source of paths)
+        yield* service.indexArea({
+          cwd: root,
+          areaId: "backend",
+          paths: [source],
+          snapshot: { key: "report-cycle", paths },
+        });
+      expect(insightCalls).toBe(2);
+    }).pipe(
+      Effect.provide(
+        serviceLayer(passed, () => {
+          insightCalls++;
+          return Effect.fail(
+            new PhpInsightsExecution.PhpInsightsExecutionError({ stage: "report" }),
+          );
+        }),
       ),
     );
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),

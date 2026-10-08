@@ -230,6 +230,16 @@ describe("automatic saved-file checks", () => {
     expect(doubles.refresh).not.toHaveBeenCalled();
   });
 
+  it("reuses a pending check across an unchanged save instead of queuing a second analysis", async () => {
+    await mount();
+    await update({ ...base, persisted: false });
+    await update(base);
+    expect(doubles.check).toHaveBeenCalledTimes(1);
+    await act(async () => pending[0]?.(success(base.contents)));
+    expect(latest?.status).toBe("checked");
+    expect(latest?.diagnostics).toHaveLength(1);
+  });
+
   it("drops in-flight results when process permission is revoked", async () => {
     await mount();
     doubles.canRun = false;

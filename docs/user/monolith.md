@@ -33,8 +33,20 @@ its report does not provide source-line positions. Selecting either endpoint sho
 Background indexing starts when the project opens. A file opened before its index is ready gets
 a foreground check without waiting for the area to finish. Matching cached results are reused;
 source hashes and area/tool configuration prevent results from another branch being reused.
-Large areas run in sequential batches. Limit errors identify the exceeded bound; other files
+Large areas run in sequential batches while reusing the full PHP analysis within
+each index run. Opened files take priority over subsequent background phases;
+an already running background command can briefly overlap. Limit errors identify the exceeded bound; other files
 can still be checked individually if automatic area indexing cannot finish.
+React output folders at the area root (`build`, `dist`, `coverage`, `out`, `.output`,
+`.nuxt`, `.svelte-kit`) are excluded from automatic indexing. Source files above
+2 MiB are skipped with a summary so the remaining files can be indexed. Such
+files still contribute to dependency-context validation within its size limits.
+For large PHP areas, update `byte-kitsune/mago-doctrine-query-budget` to
+`v0.1.0-beta.15` or later in the area's Composer tools. It reuses one Doctrine
+analysis model for the area; older versions remain supported with slower batch
+inspection. T3 bounds its background Mago workers to one thread and its opened-file
+checks to two threads. The isolated PHP insight worker can use up to 1 GiB; custom
+extension-host commands in your Mago config retain their own PHP memory limits.
 Unchanged hashes reuse prior results, including tool failures; they do not retry
 on a timer. After fixing the runtime (for example starting its container), use
 **Reindex** to retry explicitly. Editing source or area/tool configuration also

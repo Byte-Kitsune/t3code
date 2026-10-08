@@ -78,14 +78,37 @@ part of the area signature, so moving a file into a nested area cannot reuse its
 old parent-area entry merely because its bytes stayed the same.
 
 Large areas run sequential batches of at most 2,000 files or 32 MiB of source.
+Each actual index run shares one area snapshot across its batches: native Mago
+analyze/guard reports and the PHP insight graph are computed once, then selected
+per reporting batch. Explicit Reindex creates a fresh generation even for the
+same content hash. A changed final area fingerprint prevents publication of the
+old snapshot. Full PHP context must remain intact when changing this mechanism.
 PHP formatter work within those batches uses chunks of at most 128 files or
 32 KiB of path arguments, with two formatter processes at a time. Native diff
 headers must retain exact per-file attribution, including Docker mapping.
+Mago runs with one thread in the background and two for opened files. Queued or
+running opened-file checks pause subsequent background native phases in the same
+workspace; an already running Compose command finishes normally to avoid leaving
+an orphan process inside the container. Foreground lanes are workspace-specific.
+Background file reads and unchanged saves must reattach to a pending file check,
+rather than discard its response and queue another full-project analysis.
+The isolated T3 PHP worker uses a bounded 1 GiB memory limit. Area insight sidecars
+share a 64 MiB aggregate budget; ordinary foreground reports retain their existing
+bounds. Cached query maps and graph selectors avoid reparsing entire area reports
+for each batch. Two prepared snapshots share a 64 MiB cache budget so interleaved
+area jobs can reuse their results without unbounded memory growth; exceeding that
+budget evicts older entries and may require recomputation.
+
+React area-root build outputs are excluded from the automatic scan. Oversized
+source files are omitted from per-file indexing and reported in the status, but
+their contents remain hashed within dependency-context limits: native analyzers
+can still consume them while resolving other files. Same-size edits must therefore
+invalidate results. PHP `build` folders and React `src/build` remain source paths.
 
 Current outer index bounds are 50,000 source files, 100,000 filesystem entries,
 256 MiB of source, and 64 MiB of serialized cache. Other file/fingerprint bounds
 and native analyzer limits still apply. Limit failures identify the exhausted
-bound and allow individual file checking; this is not unlimited indexing. Cache
+bound and leave other individual files checkable; this is not unlimited indexing. Cache
 size is checked while accumulating results, before serializing the whole area.
 
 Execution anchors: [discovery](apps/server/src/project/AnalyzerDiscoveryService.ts),
@@ -118,14 +141,19 @@ while loading and start collapsed. Query boxes are method annotations.
 
 These integrations use independently reusable extensions:
 
-| Extension                                                                                | Integrated release | Responsibility                                       |
-| ---------------------------------------------------------------------------------------- | ------------------ | ---------------------------------------------------- |
-| [mago-architecture-graph](https://github.com/Byte-Kitsune/mago-architecture-graph)       | `v0.1.0-beta.17`   | Graph, symbol metadata, comment usage sites          |
-| [mago-doctrine-query-budget](https://github.com/Byte-Kitsune/mago-doctrine-query-budget) | `v0.1.0-beta.14`   | Batch query inspection and safe threshold inspection |
-| [mago-symfony-wiring](https://github.com/Byte-Kitsune/mago-symfony-wiring)               | `v1.1.0`           | Symfony wiring and opt-in PHP/YAML secret inspection |
+| Extension                                                                                | Integrated release | Responsibility                                                 |
+| ---------------------------------------------------------------------------------------- | ------------------ | -------------------------------------------------------------- |
+| [mago-architecture-graph](https://github.com/Byte-Kitsune/mago-architecture-graph)       | `v0.1.0-beta.17`   | Graph, symbol metadata, comment usage sites                    |
+| [mago-doctrine-query-budget](https://github.com/Byte-Kitsune/mago-doctrine-query-budget) | `v0.1.0-beta.15`   | Single-snapshot query inspection and safe threshold inspection |
+| [mago-symfony-wiring](https://github.com/Byte-Kitsune/mago-symfony-wiring)               | `v1.1.0`           | Symfony wiring and opt-in PHP/YAML secret inspection           |
 
 These are tested integration versions, not dependencies bundled with T3; each
 area installs its own tools. Keep extension APIs usable outside this fork.
+The Doctrine integration feature-detects `inspectSnapshot` to reuse one prepared
+Program for an area's selectors. Older versions retain the bounded `inspectFiles`
+fallback. The new API isolates individual file failures; it does not lift the
+extension's separate full-Program safety bounds. Project-owned extension-host
+commands still control their own PHP memory configuration.
 
 Symfony Wiring's opt-in `SecurityExtension` replaces the overlapping
 `no-literal-password` rule when configured. Complete valid Symfony `%env(...)%`

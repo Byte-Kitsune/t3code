@@ -79,6 +79,9 @@ it.effect("identifies a failed Mago config command without exposing its output",
 function mockRunner(
   options: {
     malformedQuery?: boolean;
+    expectedThreads?: number;
+    queryPaddingBytes?: number;
+    graphPaddingBytes?: number;
     securityReport?: unknown;
     expectedSecurityDisabled?: boolean;
     expectedSecurityPaths?: readonly { areaRelativePath: string }[];
@@ -152,6 +155,7 @@ function mockRunner(
       if (input.command === "php") {
         expect(data.indexPaths).toEqual([]);
         expect(data.securityOnly).toBe(true);
+        expect(input.args.slice(0, 2)).toEqual(["-d", "memory_limit=1G"]);
         return output("");
       }
       const config = decode(yield* fs.readFileString(input.args[1]!)) as {
@@ -162,7 +166,11 @@ function mockRunner(
       };
       expect(config.source.paths).toEqual(["src", "shared"]);
       expect(config.analyzer.ignore).toEqual(["mixed-argument"]);
-      expect(config.threads).toBe(2);
+      expect(config.threads).toBe(options.expectedThreads ?? 2);
+      expect(config["extension-hosts"]["t3-insights"]).toEqual({
+        command: ["php", "-d", "memory_limit=1G", expect.stringContaining("worker.php")],
+        workers: 1,
+      });
       expect(Object.keys(config["extension-hosts"])).toEqual(["t3-insights"]);
       yield* fs.writeFileString(
         data.queryOutput!,
@@ -217,6 +225,16 @@ function mockRunner(
             },
           ),
         );
+      for (const [file, padding] of [
+        [data.queryOutput, options.queryPaddingBytes],
+        [data.graphOutput, options.graphPaddingBytes],
+      ] as const) {
+        if (file && padding)
+          yield* fs.writeFileString(
+            file,
+            `${yield* fs.readFileString(file)}${" ".repeat(padding)}`,
+          );
+      }
       if (options.changeSource)
         yield* fs.writeFileString(
           data.filePath!,
@@ -245,6 +263,7 @@ it.effect(
       expect(mock.calls).toHaveLength(2);
       const analyze = mock.calls[1]!;
       expect(analyze.args).toContain("analyze");
+      expect(analyze.args[analyze.args.indexOf("--reporting-format") + 1]).toBe("count");
       expect(analyze.args).not.toContain(input.filePath);
       expect(analyze.args).not.toContain("--fix");
       expect(analyze.args).toContain(`${input.workspaceRoot}/app`);
@@ -354,11 +373,12 @@ it.effect.each(["missing", "stable", "changed"] as const)(
                   Effect.sync(() => {
                     files.set(name, contents);
                   }),
-                read: (name: string, max?: number) =>
-                  Effect.sync(() => {
-                    expect(max).toBe(16 * 1024 * 1024);
-                    return files.get(name)!;
-                  }),
+                read: (name: string, max?: number) => {
+                  expect(max).toBe(16 * 1024 * 1024);
+                  return files.has(name)
+                    ? Effect.succeed(files.get(name)!)
+                    : Effect.fail(new MagoDockerExecution.MagoDockerError({ stage: "temporary" }));
+                },
               }),
               () =>
                 Effect.sync(() => {
@@ -389,6 +409,17 @@ it.effect.each(["missing", "stable", "changed"] as const)(
                 expect(workerInput.queryOutput).toBe("/tmp/t3-insights-fixture/queries.json");
                 const config = decode(files.get("mago.json")!) as Record<string, unknown>;
                 expect(config.source).toMatchObject({ workspace: "/srv/api", paths: ["src"] });
+                expect(config["extension-hosts"]).toEqual({
+                  "t3-insights": {
+                    command: [
+                      "php",
+                      "-d",
+                      "memory_limit=1G",
+                      "/tmp/t3-insights-fixture/worker.php",
+                    ],
+                    workers: 1,
+                  },
+                });
                 files.set(
                   "queries.json",
                   encode({
@@ -690,5 +721,223 @@ it.effect("selects distinct opened and indexed file chains from one full graph s
       ["app/src/Other.php", "Other::run", 2],
     ]);
     expect(mock.calls).toHaveLength(2);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "reuses one complete area analysis across bounded batches and keeps security per batch",
+  () =>
+    Effect.gen(function* () {
+      const input = yield* setup;
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.writeFileString(`${input.cwd}/src/Other.php`, "<?php class Other {}");
+      const other = "app/src/Other.php";
+      const mock = mockRunner();
+      const snapshot = { key: "immutable-cycle-1", paths: [input.relativePath, other] };
+      const results = yield* Effect.gen(function* () {
+        const service = yield* PhpInsightsExecution.PhpInsightsExecution;
+        const first = yield* service.run({ ...input, snapshot, indexPaths: [input.relativePath] });
+        const second = yield* service.run({
+          ...input,
+          filePath: `${input.cwd}/src/Other.php`,
+          relativePath: other,
+          snapshot,
+          indexPaths: [other],
+        });
+        return [first, second];
+      }).pipe(Effect.provide(runLayer(mock.run)));
+      expect(results[0]?.indexedFiles?.map((file) => file.path)).toEqual([input.relativePath]);
+      expect(results[1]?.indexedFiles?.map((file) => file.path)).toEqual([other]);
+      expect(results[1]?.indexedFiles?.[0]?.queryBudget.methods[0]?.path).toBe(other);
+      expect(mock.calls.filter((call) => call.args.includes("analyze"))).toHaveLength(1);
+      expect(mock.calls.filter((call) => call.command === "php")).toHaveLength(1);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["source", "config", "cycle", "selectors", "foreground"] as const)(
+  "does not reuse a cached area analysis after %s changes",
+  (change) =>
+    Effect.gen(function* () {
+      const input = yield* setup;
+      const fs = yield* FileSystem.FileSystem;
+      const other = "app/src/Other.php";
+      yield* fs.writeFileString(`${input.cwd}/src/Other.php`, "<?php class Other {}");
+      const mock = mockRunner();
+      const snapshot = { key: "immutable-cycle-1", paths: [input.relativePath] };
+      yield* Effect.gen(function* () {
+        const service = yield* PhpInsightsExecution.PhpInsightsExecution;
+        yield* service.run({ ...input, snapshot, indexPaths: [input.relativePath] });
+        if (change === "source")
+          yield* fs.writeFileString(`${input.cwd}/src/Other.php`, "<?php class ChangedOther {}");
+        if (change === "config")
+          yield* fs.writeFileString(
+            input.configPath,
+            `${yield* fs.readFileString(input.configPath)}\n# Changed configuration`,
+          );
+        yield* service.run({
+          ...input,
+          ...(change === "foreground"
+            ? {}
+            : {
+                indexPaths: [input.relativePath],
+                snapshot: {
+                  key: change === "cycle" ? "immutable-cycle-2" : snapshot.key,
+                  paths: change === "selectors" ? [...snapshot.paths, other] : snapshot.paths,
+                },
+              }),
+        });
+      }).pipe(Effect.provide(runLayer(mock.run)));
+      expect(mock.calls.filter((call) => call.args.includes("analyze"))).toHaveLength(2);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("fails closed when sources change during a cached batch security check", () =>
+  Effect.gen(function* () {
+    const input = yield* setup;
+    const fs = yield* FileSystem.FileSystem;
+    const mock = mockRunner();
+    const snapshot = { key: "immutable-cycle-1", paths: [input.relativePath] };
+    const run: ProcessRunner.ProcessRunner["Service"]["run"] = (request) =>
+      mock
+        .run(request)
+        .pipe(
+          Effect.tap(() =>
+            request.command === "php"
+              ? fs
+                  .writeFileString(input.filePath, "<?php class ChangedDuringSecurity {}")
+                  .pipe(Effect.orDie)
+              : Effect.void,
+          ),
+        );
+    const result = yield* Effect.gen(function* () {
+      const service = yield* PhpInsightsExecution.PhpInsightsExecution;
+      yield* service.run({ ...input, snapshot, indexPaths: snapshot.paths });
+      return yield* service.run({ ...input, snapshot, indexPaths: snapshot.paths });
+    }).pipe(Effect.provide(runLayer(run)));
+    expect(result.queryBudget.status).toBe("failed");
+    expect(result.entryChains.status).toBe("failed");
+    expect(result.indexedFiles).toBeUndefined();
+    expect(mock.calls.filter((call) => call.args.includes("analyze"))).toHaveLength(1);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("caps background PHP analysis at one thread", () =>
+  Effect.gen(function* () {
+    const input = yield* setup;
+    const mock = mockRunner({ expectedThreads: 1 });
+    const result = yield* Effect.flatMap(PhpInsightsExecution.PhpInsightsExecution, (service) =>
+      service.run({ ...input, threads: 1 }),
+    ).pipe(Effect.provide(runLayer(mock.run)));
+    expect(result.queryBudget.status).toBe("complete");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "allows area reports above the per-file limit but enforces the combined snapshot budget",
+  () =>
+    Effect.gen(function* () {
+      const input = yield* setup;
+      const mock = mockRunner({
+        queryPaddingBytes: 17 * 1024 * 1024,
+        graphPaddingBytes: 48 * 1024 * 1024,
+      });
+      const result = yield* Effect.gen(function* () {
+        const service = yield* PhpInsightsExecution.PhpInsightsExecution;
+        const request = {
+          ...input,
+          indexPaths: [input.relativePath],
+          snapshot: { key: "bounded-large-report", paths: [input.relativePath] },
+        };
+        yield* service.run(request);
+        return yield* service.run(request);
+      }).pipe(Effect.provide(runLayer(mock.run)));
+      expect(mock.calls.filter((call) => call.args.includes("analyze"))).toHaveLength(1);
+      expect(result.indexedFiles?.[0]?.queryBudget.status).toBe("complete");
+      expect(result.indexedFiles?.[0]?.entryChains.status).toBe("failed");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("reuses a failed native snapshot attempt until the indexing cycle changes", () =>
+  Effect.gen(function* () {
+    const input = yield* setup;
+    const mock = mockRunner();
+    let attempts = 0;
+    const run: ProcessRunner.ProcessRunner["Service"]["run"] = (request) =>
+      request.args.includes("analyze")
+        ? Effect.sync(() => {
+            attempts++;
+            return { ...output(""), code: ChildProcessSpawner.ExitCode(2), timedOut: true };
+          })
+        : mock.run(request);
+    yield* Effect.gen(function* () {
+      const service = yield* PhpInsightsExecution.PhpInsightsExecution;
+      for (const key of ["cycle-1", "cycle-1", "cycle-2"]) {
+        const result = yield* service
+          .run({
+            ...input,
+            indexPaths: [input.relativePath],
+            snapshot: { key, paths: [input.relativePath] },
+          })
+          .pipe(Effect.result);
+        expect(result._tag).toBe("Failure");
+        if (result._tag === "Failure") expect(result.failure.stage).toBe("process");
+      }
+    }).pipe(Effect.provide(runLayer(run)));
+    expect(attempts).toBe(2);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each([0, 33 * 1024 * 1024])(
+  "retains interleaved area reports within the shared byte budget (%s padding)",
+  (padding) =>
+    Effect.gen(function* () {
+      const first = yield* setup;
+      const second = yield* setup;
+      const mock = mockRunner({ queryPaddingBytes: padding });
+      yield* Effect.gen(function* () {
+        const service = yield* PhpInsightsExecution.PhpInsightsExecution;
+        for (const input of [first, second, first]) {
+          const result = yield* service.run({
+            ...input,
+            indexPaths: [input.relativePath],
+            snapshot: { key: "cycle-1", paths: [input.relativePath] },
+          });
+          expect(result.indexedFiles?.[0]?.queryBudget.status).toBe("complete");
+        }
+      }).pipe(Effect.provide(runLayer(mock.run)));
+      // Two 33MiB area reports cannot coexist under the shared 64MiB cache cap.
+      expect(mock.calls.filter((call) => call.args.includes("analyze"))).toHaveLength(
+        padding === 0 ? 2 : 3,
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("retains failed native attempts across interleaved areas", () =>
+  Effect.gen(function* () {
+    const first = yield* setup;
+    const second = yield* setup;
+    const mock = mockRunner();
+    let attempts = 0;
+    const run: ProcessRunner.ProcessRunner["Service"]["run"] = (request) =>
+      request.args.includes("analyze")
+        ? Effect.sync(() => {
+            attempts++;
+            return { ...output(""), code: ChildProcessSpawner.ExitCode(2) };
+          })
+        : mock.run(request);
+    yield* Effect.gen(function* () {
+      const service = yield* PhpInsightsExecution.PhpInsightsExecution;
+      for (const input of [first, second, first]) {
+        const result = yield* service
+          .run({
+            ...input,
+            indexPaths: [input.relativePath],
+            snapshot: { key: "cycle-1", paths: [input.relativePath] },
+          })
+          .pipe(Effect.result);
+        expect(result._tag).toBe("Failure");
+      }
+    }).pipe(Effect.provide(runLayer(run)));
+    expect(attempts).toBe(2);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

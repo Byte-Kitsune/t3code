@@ -74,6 +74,17 @@ function issue(file: string, level = "Error", line = 3) {
 }
 
 describe("AnalyzerExecution", () => {
+  it.effect("bounds native Mago worker threads without changing the source selection", () =>
+    Effect.gen(function* () {
+      const { effect, calls } = runWith('{"issues":[]}', 0, { ...base, threads: 1 });
+      yield* effect;
+      expect(calls[0]?.args.slice(0, 3)).toEqual(["--threads", "1", "analyze"]);
+      expect(calls[0]?.args).not.toContain(base.filePath);
+      const invalid = runWith('{"issues":[]}', 0, { ...base, threads: 0 });
+      expect((yield* invalid.effect.pipe(Effect.flip)).category).toBe("input");
+      expect(invalid.calls).toHaveLength(0);
+    }),
+  );
   it.effect("reports native exit codes and fixed hints without exposing stderr secrets", () =>
     Effect.gen(function* () {
       const failure = yield* runWith("", 2, base, {

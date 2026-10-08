@@ -52,13 +52,22 @@ export function useMonolithFileCheck(input: {
     staleCallback.current = onStale;
   }, [onStale]);
   const [state, setState] = useState<CheckState | null>(null);
+  const inFlight = useRef<{ key: string; response: ReturnType<typeof check> } | null>(null);
   const eligible =
     supported && canRead && canRun && persisted && path !== null && revision !== null;
 
   useEffect(() => {
+    if (!supported || !canRead || !canRun) {
+      inFlight.current = null;
+      return;
+    }
     if (!eligible || path === null || state?.key === key) return;
     let active = true;
-    void check({ environmentId, input: { cwd, path } }).then((response) => {
+    // A background read or unchanged save can briefly suspend eligibility.
+    // Reattach to the same native run instead of queuing another full PHP analysis.
+    if (inFlight.current?.key !== key)
+      inFlight.current = { key, response: check({ environmentId, input: { cwd, path } }) };
+    void inFlight.current.response.then((response) => {
       if (!active) return;
       if (response._tag === "Failure") {
         setState({ key, sourceKey, status: "failed" });
@@ -74,7 +83,20 @@ export function useMonolithFileCheck(input: {
     return () => {
       active = false;
     };
-  }, [check, cwd, eligible, environmentId, key, path, revision, sourceKey, state]);
+  }, [
+    check,
+    cwd,
+    eligible,
+    environmentId,
+    key,
+    path,
+    revision,
+    sourceKey,
+    state,
+    supported,
+    canRead,
+    canRun,
+  ]);
 
   const accessible = supported && canRead && canRun;
   const current = accessible && state?.key === key ? state : null;
