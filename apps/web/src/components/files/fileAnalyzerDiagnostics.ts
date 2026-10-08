@@ -1,3 +1,4 @@
+import { isGutterOnlyAnalyzerDiagnostic } from "./fileAnalyzerPresentation";
 import type { PhpQueryAnnotation } from "./phpQueryAnnotations";
 import type { PhpCommentAnnotation } from "./phpCommentAnnotations";
 import { sha256 } from "@noble/hashes/sha2";
@@ -47,6 +48,7 @@ export function mergeFileAnalyzerAnnotations(
   const byLine = new Map<number, LineAnnotation<FileAnalyzerAnnotationGroup>>();
   for (const comment of comments) byLine.set(comment.lineNumber, { ...comment });
   for (const diagnostic of diagnostics) {
+    if (isGutterOnlyAnalyzerDiagnostic(diagnostic)) continue;
     if (diagnostic.line === undefined || !Number.isInteger(diagnostic.line) || diagnostic.line < 1)
       continue;
     const current = byLine.get(diagnostic.line);

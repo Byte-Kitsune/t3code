@@ -143,8 +143,12 @@ comments are distinct: the latter annotate implementing method signatures.
 Graph preparation is shared across a batch instead of reparsing the complete
 graph separately for every selected file.
 
-The file view keeps real analyzer errors inline and quieter availability/help
-information below the file. Analyzer/caller sections remain present for PHP files
+The file view keeps real analyzer errors inline and quieter availability
+information below the file. Line-level help and formatter/style findings use a
+gutter information icon with a tooltip, including Mago format, Biome format and
+recognized ESLint style rules. Presentation does not change original severities
+or remove findings from indexed data and AI review packets. Analyzer/caller
+sections remain present for PHP files
 while loading and start collapsed. Query boxes are method annotations.
 
 These integrations use independently reusable extensions:
@@ -253,7 +257,11 @@ has not been added. Project-wide panel-layout defaults remain unimplemented.
 
 ## PR review mode
 
-The Changes panel includes a background PR review against a configurable base
+The Changes panel refreshes after confirmed file saves (including a detached
+viewer), relevant Git-status updates and window focus. Unchanged autosaves do not
+refresh the diff. Comparing against the current local branch excludes commits
+already on that branch; its remote reference includes unpublished commits.
+The Changes panel also includes a background PR review against a configurable base
 branch, from its merge base to HEAD or the saved working tree. Results group
 captured diffs and analyzer findings by monolith area, including rename/delete
 metadata and files outside configured areas. Global and area review prompts are

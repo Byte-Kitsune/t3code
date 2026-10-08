@@ -55,6 +55,7 @@ import {
 import { PREFERRED_HIGHLIGHTER } from "../lib/syntaxHighlighting";
 import { areAllDiffFilesCollapsed, toggleAllDiffFiles } from "../lib/diffCollapse";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
+import { useGitDiffRefresh } from "../hooks/useGitDiffRefresh";
 import { useWorkspaceMutationRefresh } from "../hooks/useWorkspaceMutationRefresh";
 import { useProject, useThreadProjection, useThreadShell } from "../state/entities";
 import { resolveThreadRouteRef } from "../threadRoutes";
@@ -199,6 +200,7 @@ function DiffFileHeaderSuffix({
 
 interface DiffPanelProps {
   mode?: DiffPanelMode;
+  visible?: boolean;
   composerDraftTarget: ScopedThreadRef | DraftId;
   workspaceMutationId: string | null;
   workspace?: {
@@ -211,6 +213,7 @@ interface DiffPanelProps {
 
 export default function DiffPanel({
   mode = "inline",
+  visible = true,
   composerDraftTarget,
   workspaceMutationId,
   workspace,
@@ -580,12 +583,13 @@ export default function DiffPanel({
       : null;
   const refreshBranchDiffPreview = refreshPreviewQuery;
 
-  useEffect(() => {
-    if (!canRefreshGitDiff) return;
-    const refreshOnFocus = () => refreshBranchDiffPreview();
-    window.addEventListener("focus", refreshOnFocus);
-    return () => window.removeEventListener("focus", refreshOnFocus);
-  }, [canRefreshGitDiff, refreshBranchDiffPreview]);
+  useGitDiffRefresh({
+    enabled: canRefreshGitDiff && visible && !prReview,
+    environmentId: activeThread?.environmentId ?? null,
+    cwd: activeCwd ?? null,
+    status: gitStatusQuery.data,
+    refresh: refreshBranchDiffPreview,
+  });
 
   useWorkspaceMutationRefresh({
     enabled: canRefreshGitDiff,
@@ -1204,6 +1208,17 @@ export default function DiffPanel({
       ) : (
         <>
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background">
+            {selectedRunId === null &&
+            selectedGitScope === "branch" &&
+            gitStatusQuery.data?.refName &&
+            selectedGitSource?.baseRef?.replace(/^refs\/heads\//, "") ===
+              gitStatusQuery.data?.refName ? (
+              <p className="shrink-0 border-b border-border px-3 py-2 text-xs text-muted-foreground">
+                Comparing against local {gitStatusQuery.data.refName}: commits already on this
+                branch are excluded. To include unpublished commits, choose its remote branch above,
+                such as origin/{gitStatusQuery.data.refName}.
+              </p>
+            ) : null}
             {isSelectedPatchTruncated && !lazySource && (
               <p className="shrink-0 border-b border-border/70 bg-muted/40 px-3 py-1.5 text-2xs text-muted-foreground">
                 This preview exceeds the size limit. Changes shown are incomplete.

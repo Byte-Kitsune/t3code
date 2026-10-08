@@ -8,6 +8,7 @@ import { projectEnvironment } from "~/state/projects";
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 
+import { notifyWorkspaceFileSaved } from "../../workspaceFileSaved";
 import { FileSaveCoordinator } from "./fileSaveCoordinator";
 import {
   confirmProjectFileQueryData,
@@ -79,8 +80,16 @@ export function useFileSaveCoordinator({
               environmentId,
               input: { cwd, relativePath, contents: nextContents },
             }),
-          onConfirmed: (confirmedContents) =>
-            confirmProjectFileQueryData(environmentId, cwd, relativePath, confirmedContents),
+          onConfirmed: (confirmedContents) => {
+            const confirmed = confirmProjectFileQueryData(
+              environmentId,
+              cwd,
+              relativePath,
+              confirmedContents,
+            );
+            notifyWorkspaceFileSaved({ environmentId, cwd });
+            return confirmed;
+          },
           onUnchanged: (contents) => {
             const unsaved = getUnsavedProjectFileQueryData(environmentId, cwd, relativePath);
             if (unsaved && unsaved.contents !== contents) return false;

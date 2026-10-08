@@ -70,6 +70,10 @@ paths from supported package scripts. Automatic checks run without fixes and do 
 entire package-script recipe. Dynamic or ambiguous recipes need an explicit configuration or a
 direct analyzer script.
 
+Formatting and style hints appear as information icons beside source line numbers.
+Hover an icon to read its findings. These hints remain available to AI reviews;
+T3 does not format the file automatically. Other lint errors keep their inline messages.
+
 ESLint findings with positions appear beside the relevant source lines. Dependency-cruiser checks
 the configured source folders as a whole; relationship violations appear under the file because
 its report does not provide source-line positions. Selecting either endpoint shows the violation.

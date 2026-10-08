@@ -150,3 +150,35 @@ it("keeps positionless findings for their file but does not invent inline annota
   expect(inline[0]?.lineNumber).toBe(2);
   expect(inline[0]?.metadata.diagnostics).toEqual([finding]);
 });
+
+it("keeps formatter/style findings in the results but removes their inline blocks without dropping lint errors or comments", () => {
+  const comments = [
+    {
+      lineNumber: 2,
+      metadata: {
+        entries: [
+          { id: "review", kind: "comment" as const, startLine: 2, endLine: 2, text: "Review this" },
+        ],
+      },
+    },
+  ];
+  const diagnostics = [
+    { ...finding, operation: "format" as const, ruleId: "mago/format" },
+    { ...finding, tool: "biome" as const, operation: "check" as const, ruleId: "format" },
+    {
+      ...finding,
+      tool: "eslint" as const,
+      operation: "check" as const,
+      ruleId: "@stylistic/indent",
+    },
+    { ...finding, severity: "info" as const },
+    finding,
+  ];
+  const before = JSON.stringify(diagnostics);
+  const annotations = mergeFileAnalyzerAnnotations(comments, diagnostics);
+  expect(annotations).toHaveLength(1);
+  expect(annotations[0]?.metadata.diagnostics).toEqual([finding]);
+  expect(annotations[0]?.metadata.entries).toEqual(comments[0]?.metadata.entries);
+  expect(JSON.stringify(diagnostics)).toBe(before);
+  expect(mergeFileAnalyzerAnnotations([], diagnostics.slice(0, 4))).toEqual([]);
+});

@@ -36,7 +36,7 @@ describe("file analyzer line gutter", () => {
       diagnostic(3, "info"),
     ]);
     expect(row.getAttribute("data-t3-analyzer-severity")).toBe("error");
-    expect(row.textContent).toBe("3");
+    expect(row.querySelector("[data-line-number-content]")?.textContent).toBe("3");
     expect(row.title).toBe("existing");
     row.click();
     expect(click).toHaveBeenCalledOnce();
@@ -61,7 +61,7 @@ describe("file analyzer line gutter", () => {
     expect(shadow.querySelector("[data-t3-analyzer-severity]")).toBeNull();
     expect(shadow.querySelector("style")).toBeNull();
   });
-  it("keeps errors and warnings expanded while only help has an icon disclosure", async () => {
+  it("keeps errors and warnings expanded while help belongs to the line gutter", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const container = document.createElement("div");
     document.body.append(container);
@@ -74,22 +74,10 @@ describe("file analyzer line gutter", () => {
           />,
         ),
       );
-      const disclosure = container.querySelector("details")!;
-      expect(disclosure.open).toBe(false);
-      expect(container.querySelectorAll("details")).toHaveLength(1);
+      expect(container.querySelectorAll("details")).toHaveLength(0);
       expect(container.querySelectorAll(".font-medium")).toHaveLength(2);
       expect(container.querySelector(".border-destructive")?.textContent).toContain("test-rule");
       expect(container.querySelector(".border-warning")?.textContent).toContain("test-rule");
-      expect(container.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe(
-        "Information",
-      );
-      expect(container.querySelector("summary")?.textContent).not.toContain(
-        "Unexpected nullable call",
-      );
-      expect(container.querySelector("summary")?.textContent).not.toContain("test-rule");
-      disclosure.open = true;
-      expect(disclosure.textContent).toContain("Unexpected nullable call");
-      expect(disclosure.textContent).toContain("test-rule · L3:4");
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -112,4 +100,31 @@ it("does not mark a gutter row for dependency-cruiser findings without line info
     },
   ]);
   expect(host.querySelector("[data-t3-analyzer-severity]")).toBeNull();
+});
+
+it("shows formatting as a gutter info icon with a tooltip and clears virtualized markers", async () => {
+  const host = document.createElement("div");
+  host.innerHTML =
+    '<div data-column-number="3" title="native"><span data-line-number-content>3</span></div>';
+  const formatting = {
+    ...diagnostic(3, "warning"),
+    operation: "format" as const,
+    ruleId: "mago/format",
+    message: "Mago would format this line.",
+  };
+  syncFileAnalyzerGutter(host, [formatting]);
+  expect(
+    host.querySelector("[data-t3-analyzer-severity]")?.getAttribute("data-t3-analyzer-severity"),
+  ).toBe("info");
+  const marker = host.querySelector<HTMLElement>("[data-t3-analyzer-marker]")!;
+  expect(marker.textContent).toBe("ⓘ");
+  expect(marker.title).toContain("Mago would format this line.");
+  expect(host.querySelector("[data-column-number]")?.getAttribute("title")).toBe("native");
+  expect(formatting.severity).toBe("warning");
+  const click = vi.fn();
+  host.addEventListener("click", click);
+  marker.click();
+  expect(click).toHaveBeenCalledOnce();
+  syncFileAnalyzerGutter(host, [{ ...formatting, line: 90 }]);
+  expect(host.querySelector("[data-t3-analyzer-marker]")).toBeNull();
 });

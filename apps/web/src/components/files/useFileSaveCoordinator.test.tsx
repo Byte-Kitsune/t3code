@@ -5,16 +5,17 @@ import { act, StrictMode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-const { writeFile, confirmFile, readScope, getUnsavedFile, readFile, clearFile } = vi.hoisted(
-  () => ({
+const { writeFile, confirmFile, readScope, getUnsavedFile, readFile, clearFile, saved } =
+  vi.hoisted(() => ({
     writeFile: vi.fn(),
     confirmFile: vi.fn(),
     readScope: vi.fn(),
     getUnsavedFile: vi.fn(),
     readFile: vi.fn(),
     clearFile: vi.fn(),
-  }),
-);
+    saved: vi.fn(),
+  }));
+vi.mock("../../workspaceFileSaved", () => ({ notifyWorkspaceFileSaved: saved }));
 vi.mock("~/rpc/atomRegistry", () => ({ appAtomRegistry: { get: readFile } }));
 vi.mock("~/state/projects", () => ({ projectEnvironment: { writeFile: {} } }));
 vi.mock("~/state/session", () => ({
@@ -80,6 +81,7 @@ beforeEach(() => {
   onPendingChange.mockReset();
   readFile.mockReset().mockReturnValue(AsyncResult.initial());
   clearFile.mockReset();
+  saved.mockReset();
 });
 
 afterEach(async () => {
@@ -101,6 +103,7 @@ describe("file-save React lifecycle", () => {
     await vi.runAllTimersAsync();
     expect(writeFile).toHaveBeenCalledOnce();
     expect(confirmFile).not.toHaveBeenCalled();
+    expect(saved).not.toHaveBeenCalled();
   });
 
   it("also suspends ownership when a flush throws", async () => {
@@ -115,6 +118,7 @@ describe("file-save React lifecycle", () => {
     await vi.runAllTimersAsync();
     expect(writeFile).toHaveBeenCalledOnce();
     expect(confirmFile).not.toHaveBeenCalled();
+    expect(saved).not.toHaveBeenCalled();
   });
 
   it("resumes a suspended editor after a cancelled handoff", async () => {
@@ -183,6 +187,7 @@ describe("file-save React lifecycle", () => {
     changeHandler()("retained draft");
     await vi.advanceTimersByTimeAsync(500);
     expect(confirmFile).not.toHaveBeenCalled();
+    expect(saved).not.toHaveBeenCalled();
     expect(onPendingChange).toHaveBeenLastCalledWith("file.txt", true);
     await flushProjectFileSaves(environmentId, "/workspace");
     expect(confirmFile).toHaveBeenCalledWith(
@@ -194,6 +199,24 @@ describe("file-save React lifecycle", () => {
     expect(writeFile).toHaveBeenCalledTimes(2);
   });
 
+  it("preserves a newer unsaved buffer when an earlier disk write finishes", async () => {
+    confirmFile.mockReturnValue(false);
+    mount();
+    changeHandler()("older persisted source");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(saved).toHaveBeenCalledOnce();
+    expect(onPendingChange).toHaveBeenLastCalledWith("file.txt", true);
+  });
+
+  it("notifies the diff only after a successful confirmed write", async () => {
+    mount();
+    changeHandler()("new source");
+    expect(saved).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(saved).toHaveBeenCalledOnce();
+    expect(saved).toHaveBeenCalledWith({ environmentId, cwd: "/workspace" });
+  });
+
   it("clears an unchanged optimistic draft without writing or refreshing analysis", async () => {
     readFile.mockReturnValue(AsyncResult.success({ contents: "disk contents", truncated: false }));
     getUnsavedFile.mockReturnValue({ contents: "disk contents" });
@@ -202,6 +225,7 @@ describe("file-save React lifecycle", () => {
     await vi.runAllTimersAsync();
     expect(writeFile).not.toHaveBeenCalled();
     expect(confirmFile).not.toHaveBeenCalled();
+    expect(saved).not.toHaveBeenCalled();
     expect(clearFile).toHaveBeenCalledWith(environmentId, "/workspace", "file.txt");
     expect(onPendingChange).toHaveBeenLastCalledWith("file.txt", false);
   });
@@ -308,6 +332,7 @@ describe("file-save React lifecycle", () => {
       await vi.runAllTimersAsync();
       expect(writeFile).not.toHaveBeenCalled();
       expect(confirmFile).not.toHaveBeenCalled();
+      expect(saved).not.toHaveBeenCalled();
       expect(onPendingChange).toHaveBeenLastCalledWith("file.txt", true);
     },
   );

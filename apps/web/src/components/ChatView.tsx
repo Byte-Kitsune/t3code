@@ -10948,6 +10948,7 @@ export default function ChatView(props: ChatViewProps) {
         <DiffPanel
           key={activeThreadKey}
           mode="embedded"
+          visible={rightPanelOpen}
           composerDraftTarget={composerDraftTarget}
           workspaceMutationId={workspaceMutationId}
           {...(activeProject && gitCwd
