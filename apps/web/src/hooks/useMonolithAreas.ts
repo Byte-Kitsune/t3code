@@ -92,7 +92,7 @@ export function useMonolithAreas(
             : {
                 key,
                 saving: false,
-                error: "Could not create t3.monolith.json. Retry by saving the project areas.",
+                error: "Could not create .t3/monolith.json. Retry by saving the project areas.",
               },
         );
     });

@@ -176,7 +176,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/projects",
     scope: "project",
     searchTerms: [
-      "monorepo groups PHP React folders paths discovery t3.monolith.json Docker Compose Mago service container runtime",
+      "monorepo groups PHP React folders paths discovery .t3/monolith.json Docker Compose Mago service container runtime",
     ],
   },
   {

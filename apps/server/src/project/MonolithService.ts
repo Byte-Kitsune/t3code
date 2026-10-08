@@ -1,5 +1,6 @@
 import {
   MONOLITH_CONFIG_FILE_NAME,
+  LEGACY_MONOLITH_CONFIG_FILE_NAME,
   MonolithConfig,
   type MonolithArea,
   type MonolithGetInput,
@@ -154,16 +155,48 @@ const make = Effect.gen(function* () {
     return config;
   });
 
-  const readConfig = Effect.fnUntraced(function* (root: string) {
-    const configPath = path.join(root, MONOLITH_CONFIG_FILE_NAME);
-    const link = yield* fileSystem.readLink(configPath).pipe(Effect.option);
-    if (Option.isSome(link)) {
+  const safeConfigPath = Effect.fnUntraced(function* (root: string, target: string) {
+    const relative = path.relative(root, target);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
       return yield* new MonolithError({
-        operation: "read",
-        path: configPath,
+        operation: "validate",
+        path: target,
         reason: "unsafe_path",
       });
+    let ancestor = root;
+    const parts = relative.split(path.sep).filter(Boolean);
+    for (const [index, part] of parts.entries()) {
+      ancestor = path.join(ancestor, part);
+      const link = yield* fileSystem.readLink(ancestor).pipe(Effect.option);
+      const resolved = yield* optionalRealPath(ancestor);
+      if (Option.isSome(link) || (Option.isSome(resolved) && resolved.value !== ancestor))
+        return yield* new MonolithError({
+          operation: "validate",
+          path: ancestor,
+          reason: "unsafe_path",
+        });
+      if (
+        Option.isSome(resolved) &&
+        index < parts.length - 1 &&
+        (yield* fileSystem
+          .stat(ancestor)
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new MonolithError({ operation: "validate", path: ancestor, reason: "io", cause }),
+            ),
+          )).type !== "Directory"
+      )
+        return yield* new MonolithError({
+          operation: "validate",
+          path: ancestor,
+          reason: "unsafe_path",
+        });
     }
+  });
+
+  const readConfigFile = Effect.fnUntraced(function* (root: string, configPath: string) {
+    yield* safeConfigPath(root, configPath);
     const raw = yield* fileSystem.readFileString(configPath).pipe(
       Effect.asSome,
       Effect.catchTags({
@@ -175,7 +208,7 @@ const make = Effect.gen(function* () {
               ),
       }),
     );
-    if (Option.isNone(raw)) return Option.none<MonolithConfig>();
+    if (Option.isNone(raw)) return Option.none<{ config: MonolithConfig; configPath: string }>();
     const config = yield* decodeConfigJson(raw.value).pipe(
       Effect.mapError(
         (cause) =>
@@ -187,7 +220,13 @@ const make = Effect.gen(function* () {
           }),
       ),
     );
-    return Option.some(yield* validateConfig(root, config));
+    return Option.some({ config: yield* validateConfig(root, config), configPath });
+  });
+  const readConfig = Effect.fnUntraced(function* (root: string) {
+    const current = yield* readConfigFile(root, path.join(root, MONOLITH_CONFIG_FILE_NAME));
+    return Option.isSome(current)
+      ? current
+      : yield* readConfigFile(root, path.join(root, LEGACY_MONOLITH_CONFIG_FILE_NAME));
   });
 
   const scan = Effect.fnUntraced(function* (root: string) {
@@ -289,8 +328,12 @@ const make = Effect.gen(function* () {
     );
     return yield* Effect.scoped(
       Effect.gen(function* () {
+        yield* safeConfigPath(root, configPath);
+        if (initial && Option.isSome(yield* readConfig(root))) return false;
+        yield* fileSystem.makeDirectory(path.dirname(configPath), { recursive: true });
+        yield* safeConfigPath(root, configPath);
         const temporary = yield* fileSystem.makeTempFileScoped({
-          directory: root,
+          directory: path.dirname(configPath),
           prefix: ".t3-monolith-",
           suffix: ".json",
         });
@@ -323,7 +366,7 @@ const make = Effect.gen(function* () {
     const root = yield* resolveRoot(cwd);
     const configPath = path.join(root, MONOLITH_CONFIG_FILE_NAME);
     const existing = yield* readConfig(root);
-    if (Option.isSome(existing)) return { config: existing.value, configPath, source: "config" };
+    if (Option.isSome(existing)) return { ...existing.value, source: "config" };
     const config: MonolithConfig = { version: 1, initialized: true, areas: yield* scan(root) };
     if (initialize === false) return { config, configPath, source: "discovered" };
     const published = yield* writeConfig(root, config, true);
@@ -336,7 +379,7 @@ const make = Effect.gen(function* () {
         reason: "invalid_config",
       });
     }
-    return { config: winner.value, configPath, source: "config" };
+    return { ...winner.value, source: "config" };
   });
   const discover: MonolithService["Service"]["discover"] = Effect.fn("MonolithService.discover")(
     function* ({ cwd }) {
@@ -350,15 +393,24 @@ const make = Effect.gen(function* () {
     const root = yield* resolveRoot(cwd);
     const config = yield* validateConfig(root, input);
     const configPath = path.join(root, MONOLITH_CONFIG_FILE_NAME);
-    const link = yield* fileSystem.readLink(configPath).pipe(Effect.option);
-    if (Option.isSome(link)) {
-      return yield* new MonolithError({
-        operation: "write",
-        path: configPath,
-        reason: "unsafe_path",
-      });
-    }
+    yield* safeConfigPath(root, configPath);
+    const legacyPath = path.join(root, LEGACY_MONOLITH_CONFIG_FILE_NAME);
+    const legacyBefore = yield* Effect.gen(function* () {
+      yield* safeConfigPath(root, legacyPath);
+      const raw = yield* fileSystem.readFileString(legacyPath);
+      yield* decodeConfigJson(raw);
+      return raw;
+    }).pipe(Effect.option);
     yield* writeConfig(root, config, false);
+    if (Option.isSome(legacyBefore)) {
+      // Remove only a regular, valid legacy config that has not changed during
+      // publication. Other .t3 runtime files and concurrent legacy edits remain.
+      yield* Effect.gen(function* () {
+        yield* safeConfigPath(root, legacyPath);
+        if ((yield* fileSystem.readFileString(legacyPath)) === legacyBefore.value)
+          yield* fileSystem.remove(legacyPath);
+      }).pipe(Effect.option);
+    }
     return { config, configPath, source: "config" };
   });
 

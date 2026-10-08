@@ -2,7 +2,8 @@ import * as Schema from "effect/Schema";
 
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
-export const MONOLITH_CONFIG_FILE_NAME = "t3.monolith.json";
+export const MONOLITH_CONFIG_FILE_NAME = ".t3/monolith.json";
+export const LEGACY_MONOLITH_CONFIG_FILE_NAME = "t3.monolith.json";
 
 const MonolithAreaPath = TrimmedNonEmptyString.check(
   Schema.isMaxLength(1024),

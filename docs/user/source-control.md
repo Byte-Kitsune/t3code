@@ -245,7 +245,7 @@ PHP or React. **Rescan** offers new applications to add; it keeps your saved cho
 overlap, the deepest folder wins. An excluded deeper folder goes to **Other**, which appears after
 the configured groups. Use the diff file tree's area selector to review one group at a time.
 
-Areas are saved in `t3.monolith.json` at the checkout root. Commit this file to share the grouping
+Areas are saved in `.t3/monolith.json` inside the checkout. Existing root-level `t3.monolith.json` files are migrated on the next save. Commit this file to share the grouping
 with your team. Reading through a connection without filesystem write access does not create it.
 Invalid existing configuration is reported instead of replaced.
 
@@ -284,7 +284,7 @@ to the repository root, the PHP area's absolute path in the container, and the M
 Without overrides, T3 Code detects the nearest Compose project and bind mount, then looks for
 Mago in the area's Composer installation or on the container's executable path.
 
-Docker choices are shared per area through `t3.monolith.json`, for example:
+Docker choices are shared per area through `.t3/monolith.json`, for example:
 
 ```json
 "magoDocker": {
@@ -310,7 +310,7 @@ Query ranges describe one invocation; unresolved calls and recursion remain visi
 bounds. An injected service alone does not prove a method call.
 
 In **Monolith areas**, configure PHP **Entry folders** relative to that area, for example
-`app/Http, src/Command`. They are shared as `entrypointPaths` in `t3.monolith.json`; the defaults are
+`app/Http, src/Command`. They are shared as `entrypointPaths` in `.t3/monolith.json`; the defaults are
 `src/Controller` and `src/Command`. An existing `.mago/architecture-policy.json` with an enabled
 scope graph takes precedence, including its source-root and exclusion filters. Chains include source links and one shortest path per configured
 entry and target method/service variant. Missing references and incomplete graphs are shown

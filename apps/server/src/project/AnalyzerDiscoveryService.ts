@@ -1,4 +1,4 @@
-import type { MonolithArea } from "@t3tools/contracts";
+import { MONOLITH_CONFIG_FILE_NAME, type MonolithArea } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -216,7 +216,7 @@ const make = Effect.gen(function* () {
       // A configured container may own Composer's vendor directory in a named
       // volume or install Mago globally; host file availability is not its probe.
       if (area.kind === "php" && area.magoDocker && manifests.length === 0)
-        manifests.push({ directory: areaRoot, filename: "t3.monolith.json", manifest: {} });
+        manifests.push({ directory: areaRoot, filename: MONOLITH_CONFIG_FILE_NAME, manifest: {} });
       const hasDeclaredMago = manifests.some(
         (entry) => "carthage-software/mago" in dependencies(entry.manifest),
       );
@@ -236,7 +236,7 @@ const make = Effect.gen(function* () {
         )
           continue;
         const manifestPath = relative(
-          path.join(filename === "t3.monolith.json" ? root : directory, filename),
+          path.join(filename === MONOLITH_CONFIG_FILE_NAME ? root : directory, filename),
         );
         const scripts: Array<AnalyzerScript> = [];
         const scriptDirectories = new Map<AnalyzerScript, string>();

@@ -15,7 +15,8 @@ build/
 .logs/
 release/
 release-mock/
-.t3
+.t3/*
+!.t3/monolith.json
 .idea/
 apps/web/.playwright
 apps/web/playwright-report

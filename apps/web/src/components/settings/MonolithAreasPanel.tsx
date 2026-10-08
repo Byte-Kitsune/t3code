@@ -53,8 +53,8 @@ export function MonolithAreasPanel({
       <div className="space-y-4 px-3 py-3 sm:px-4">
         <div className="space-y-1 text-xs text-muted-foreground">
           <p>
-            Group changes by PHP, React, or any folder. Areas are saved in t3.monolith.json for your
-            team to commit.
+            Group changes by PHP, React, or any folder. Areas are saved in .t3/monolith.json for
+            your team to commit.
           </p>
           {checkoutLabel ? <p className="break-all font-mono">{cwd}</p> : null}
           <p>

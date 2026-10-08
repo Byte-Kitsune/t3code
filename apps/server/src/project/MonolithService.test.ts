@@ -61,7 +61,7 @@ it.layer(layerTest)("MonolithService", (it) => {
           { path: "artifact-test/frontend", kind: "react" },
           { path: "packages/deep/sample", kind: "react" },
         ]);
-        expect(yield* fs.exists(path.join(root, "t3.monolith.json"))).toBe(false);
+        expect(yield* fs.exists(path.join(root, ".t3/monolith.json"))).toBe(false);
       }),
   );
 
@@ -130,9 +130,9 @@ it.layer(layerTest)("MonolithService", (it) => {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* temporaryRoot;
-      yield* write(root, "t3.monolith.json", "{broken");
+      yield* write(root, ".t3/monolith.json", "{broken");
       expect((yield* service.get({ cwd: root }).pipe(Effect.flip)).reason).toBe("invalid_config");
-      expect(yield* fs.readFileString(path.join(root, "t3.monolith.json"))).toBe("{broken");
+      expect(yield* fs.readFileString(path.join(root, ".t3/monolith.json"))).toBe("{broken");
     }),
   );
 
@@ -200,7 +200,8 @@ it.layer(layerTest)("MonolithService", (it) => {
           "unsafe_path",
         );
         expect(yield* service.discover({ cwd: root })).toEqual([]);
-        yield* fs.symlink(path.join(outside, "config.json"), path.join(root, "t3.monolith.json"));
+        yield* fs.makeDirectory(path.join(root, ".t3"));
+        yield* fs.symlink(path.join(outside, "config.json"), path.join(root, ".t3/monolith.json"));
         expect((yield* service.get({ cwd: root }).pipe(Effect.flip)).reason).toBe("unsafe_path");
         expect(
           (yield* service.save({ cwd: root, config: emptyConfig }).pipe(Effect.flip)).reason,
@@ -210,11 +211,111 @@ it.layer(layerTest)("MonolithService", (it) => {
   );
 
   it.effect(
+    "loads a legacy config without mutation and migrates it on save while preserving runtime files",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* MonolithService.MonolithService;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* temporaryRoot;
+        const legacy = { ...emptyConfig, defaultBaseBranch: "develop" };
+        yield* write(root, "t3.monolith.json", JSON.stringify(legacy));
+        yield* write(root, ".t3/session/state.json", "runtime");
+        const loaded = yield* service.get({ cwd: root });
+        expect(loaded.config).toEqual(legacy);
+        expect(loaded.configPath).toBe(path.join(root, "t3.monolith.json"));
+        expect(yield* fs.exists(path.join(root, ".t3/monolith.json"))).toBe(false);
+        const saved = yield* service.save({
+          cwd: root,
+          config: { ...legacy, defaultBaseBranch: "main" },
+        });
+        expect(saved.configPath).toBe(path.join(root, ".t3/monolith.json"));
+        expect(yield* fs.exists(path.join(root, "t3.monolith.json"))).toBe(false);
+        expect((yield* service.get({ cwd: root })).config.defaultBaseBranch).toBe("main");
+        expect(yield* fs.readFileString(path.join(root, ".t3/session/state.json"))).toBe("runtime");
+      }),
+  );
+
+  it.effect(
+    "prefers canonical configuration and never falls back from an invalid canonical file",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* MonolithService.MonolithService;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* temporaryRoot;
+        yield* write(
+          root,
+          "t3.monolith.json",
+          JSON.stringify({ ...emptyConfig, defaultBaseBranch: "legacy" }),
+        );
+        yield* write(
+          root,
+          ".t3/monolith.json",
+          JSON.stringify({ ...emptyConfig, defaultBaseBranch: "canonical" }),
+        );
+        const loaded = yield* service.get({ cwd: root });
+        expect(loaded.config.defaultBaseBranch).toBe("canonical");
+        expect(loaded.configPath).toBe(path.join(root, ".t3/monolith.json"));
+        expect(yield* fs.exists(path.join(root, "t3.monolith.json"))).toBe(true);
+        yield* write(root, ".t3/monolith.json", "{invalid");
+        expect((yield* service.get({ cwd: root }).pipe(Effect.flip)).reason).toBe("invalid_config");
+        expect(yield* fs.readFileString(path.join(root, ".t3/monolith.json"))).toBe("{invalid");
+      }),
+  );
+
+  it.effect(
+    "rejects linked and dangling .t3 directories and preserves the legacy config on failed migration",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* MonolithService.MonolithService;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const outside = yield* temporaryRoot;
+        yield* write(outside, "sentinel", "external");
+        for (const destination of [outside, path.join(outside, "missing")]) {
+          const root = yield* temporaryRoot;
+          yield* write(root, "t3.monolith.json", JSON.stringify(emptyConfig));
+          yield* fs.symlink(destination, path.join(root, ".t3"));
+          expect((yield* service.get({ cwd: root }).pipe(Effect.flip)).reason).toBe("unsafe_path");
+          expect(
+            (yield* service.save({ cwd: root, config: emptyConfig }).pipe(Effect.flip)).reason,
+          ).toBe("unsafe_path");
+          expect(yield* fs.readFileString(path.join(root, "t3.monolith.json"))).toBe(
+            JSON.stringify(emptyConfig),
+          );
+        }
+        expect(yield* fs.readFileString(path.join(outside, "sentinel"))).toBe("external");
+        expect(yield* fs.exists(path.join(outside, "monolith.json"))).toBe(false);
+      }),
+  );
+
+  it.effect("preserves a linked legacy config when saving canonical configuration", () =>
+    Effect.gen(function* () {
+      const service = yield* MonolithService.MonolithService;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* temporaryRoot;
+      const outside = yield* temporaryRoot;
+      yield* write(outside, "config.json", JSON.stringify(emptyConfig));
+      yield* fs.symlink(path.join(outside, "config.json"), path.join(root, "t3.monolith.json"));
+      yield* service.save({ cwd: root, config: emptyConfig });
+      expect(yield* fs.readLink(path.join(root, "t3.monolith.json"))).toBe(
+        path.join(outside, "config.json"),
+      );
+      expect(yield* fs.readFileString(path.join(outside, "config.json"))).toBe(
+        JSON.stringify(emptyConfig),
+      );
+    }),
+  );
+
+  it.effect(
     "concurrent initialization publishes a complete file and cleans up temporary files",
     () =>
       Effect.gen(function* () {
         const service = yield* MonolithService.MonolithService;
         const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
         const root = yield* temporaryRoot;
         yield* write(root, "composer.json", "{}");
         const snapshots = yield* Effect.all(
@@ -226,10 +327,8 @@ it.layer(layerTest)("MonolithService", (it) => {
         expect(JSON.parse(yield* fs.readFileString(snapshots[0]!.configPath))).toEqual(
           snapshots[0]!.config,
         );
-        expect((yield* fs.readDirectory(root)).toSorted()).toEqual([
-          "composer.json",
-          "t3.monolith.json",
-        ]);
+        expect((yield* fs.readDirectory(root)).toSorted()).toEqual([".t3", "composer.json"]);
+        expect(yield* fs.readDirectory(path.join(root, ".t3"))).toEqual(["monolith.json"]);
       }),
   );
 });

@@ -96,7 +96,7 @@ it.layer(base)("SymfonyReferenceService", (it) => {
       yield* fs.remove(`${root}/api/tools/vendor`, { recursive: true });
       yield* write(
         root,
-        "t3.monolith.json",
+        ".t3/monolith.json",
         JSON.stringify({
           version: 1,
           initialized: true,
@@ -186,7 +186,7 @@ it.layer(base)("SymfonyReferenceService", (it) => {
         const root = yield* fixture;
         yield* write(
           root,
-          "t3.monolith.json",
+          ".t3/monolith.json",
           JSON.stringify({
             version: 1,
             initialized: true,

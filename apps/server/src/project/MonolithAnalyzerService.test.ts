@@ -91,7 +91,7 @@ it.effect("missing binaries are unavailable and never execute", () =>
       "unavailable",
     ]);
     expect(result.diagnostics).toEqual([]);
-    expect(yield* fs.exists(`${root}/t3.monolith.json`)).toBe(false);
+    expect(yield* fs.exists(`${root}/.t3/monolith.json`)).toBe(false);
   }).pipe(Effect.scoped, Effect.provide(serviceLayer(() => Effect.die("unexpected execution")))),
 );
 
@@ -100,7 +100,7 @@ it.effect("disabled and arbitrary folder groups do not execute language analyzer
     const root = yield* setup;
     yield* write(
       root,
-      "t3.monolith.json",
+      ".t3/monolith.json",
       JSON.stringify({
         version: 1,
         initialized: true,
@@ -113,7 +113,7 @@ it.effect("disabled and arbitrary folder groups do not execute language analyzer
     expect(result.runs).toEqual([]);
     yield* write(
       root,
-      "t3.monolith.json",
+      ".t3/monolith.json",
       JSON.stringify({
         version: 1,
         initialized: true,
@@ -219,7 +219,7 @@ const insightSetup = Effect.gen(function* () {
   );
   yield* write(
     root,
-    "t3.monolith.json",
+    ".t3/monolith.json",
     JSON.stringify({
       version: 1,
       initialized: true,
@@ -333,7 +333,7 @@ it.effect("uses the configured Docker runtime despite missing host vendor and ex
     const runtime = { service: "php", composeDirectory: ".", containerPath: "/workspace/app" };
     yield* write(
       root,
-      "t3.monolith.json",
+      ".t3/monolith.json",
       JSON.stringify({
         version: 1,
         initialized: true,
