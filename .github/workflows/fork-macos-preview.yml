@@ -57,6 +57,8 @@ jobs:
           ditto -x -k "$zip_path" verify
           app_path="$(find verify -maxdepth 1 -name '*.app' -print -quit)"
           test -n "$app_path"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          codesign --display --verbose=2 "$app_path"
           test ! -e "$app_path/Contents/Resources/app-update.yml"
           executable="$(find "$app_path/Contents/MacOS" -maxdepth 1 -type f -print -quit)"
           ELECTRON_RUN_AS_NODE=1 "$executable" "$app_path/Contents/Resources/app.asar/apps/server/dist/bin.mjs" --help

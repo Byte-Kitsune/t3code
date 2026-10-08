@@ -2731,6 +2731,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         },
       ],
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
+      // Apple Silicon previews still need a valid local signature after packaging.
+      // This does not provide Developer ID trust or notarization.
+      ...(!signed ? { identity: "-", hardenedRuntime: false } : {}),
       ...(macPasskeySigning
         ? {
             entitlements: macPasskeySigning.entitlementsPath,
