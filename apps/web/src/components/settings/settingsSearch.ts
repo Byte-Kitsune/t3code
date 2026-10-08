@@ -171,6 +171,24 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["name icon emoji image checkout remove delete"],
   },
   {
+    id: "monolith-areas",
+    title: "Monolith areas",
+    to: "/settings/projects",
+    scope: "project",
+    searchTerms: [
+      "monorepo groups PHP React folders paths discovery t3.monolith.json Docker Compose Mago service container runtime",
+    ],
+  },
+  {
+    id: "file-analyzers",
+    title: "File analyzers",
+    to: "/settings/projects",
+    scope: "project",
+    searchTerms: [
+      "Mago Biome PHP React Doctrine query budget Symfony wiring entry chains container references Docker Compose installed checks diagnostics",
+    ],
+  },
+  {
     id: "default-model",
     title: "Default model",
     to: "/settings/general",
@@ -1031,7 +1049,8 @@ function settingsScopeKindFromSearch(search: SettingsScopeSearch): ResolvedSetti
 
 export function isSettingsOverviewVisible(search: SettingsScopeSearch): boolean {
   const kind = settingsScopeKindFromSearch(search);
-  return kind === "project" || kind === "checkout";
+  // The project page provides a scope chooser before a project is selected.
+  return kind !== "unavailable";
 }
 
 /**

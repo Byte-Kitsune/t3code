@@ -18,11 +18,13 @@ export function MonolithAnalyzersPanel({
   projectId,
   cwd,
   checkoutLabel,
+  sectionId,
 }: {
   environmentId: EnvironmentId;
   projectId: ProjectId;
   cwd: string;
   checkoutLabel?: string;
+  sectionId?: string;
 }) {
   const clone = useProjectClone(scopeProjectRef(environmentId, projectId));
   const awaitingClone = clone !== null && clone.phase !== "done";
@@ -83,6 +85,7 @@ export function MonolithAnalyzersPanel({
   if (!supported) return null;
   return (
     <SettingsSection
+      id={sectionId}
       title={checkoutLabel ? `File analyzers · ${checkoutLabel}` : "File analyzers"}
       icon={<WrenchIcon className="size-4" />}
     >
@@ -126,7 +129,12 @@ export function MonolithAnalyzersPanel({
               <div key={`${tool.tool}:${tool.manifestPath}`} className="space-y-2">
                 <p>
                   <span className="font-medium">{tool.tool === "mago" ? "Mago" : "Biome"}</span> ·{" "}
-                  {tool.available ? "Installed" : "Declared; local binary unavailable"}
+                  {tool.tool === "mago" &&
+                  areas.areas.find((entry) => entry.id === area.areaId)?.magoDocker
+                    ? "Docker Compose"
+                    : tool.available
+                      ? "Installed"
+                      : "Declared; local binary unavailable"}
                 </p>
                 <p className="break-all font-mono text-muted-foreground">{tool.manifestPath}</p>
                 {tool.configPath ? (
@@ -154,8 +162,9 @@ export function MonolithAnalyzersPanel({
                       disabled={
                         !canGenerate ||
                         currentOperation?.pending === true ||
-                        !tool.symfonyWiringReference.generatorAvailable ||
-                        !tool.symfonyWiringReference.autoloadAvailable
+                        (!areas.areas.find((entry) => entry.id === area.areaId)?.magoDocker &&
+                          (!tool.symfonyWiringReference.generatorAvailable ||
+                            !tool.symfonyWiringReference.autoloadAvailable))
                       }
                       onClick={() => void generateReference(area.areaId)}
                     >
@@ -166,8 +175,9 @@ export function MonolithAnalyzersPanel({
                         Generation requires permission to run tools and write files.
                       </p>
                     ) : null}
-                    {!tool.symfonyWiringReference.generatorAvailable ||
-                    !tool.symfonyWiringReference.autoloadAvailable ? (
+                    {!areas.areas.find((entry) => entry.id === area.areaId)?.magoDocker &&
+                    (!tool.symfonyWiringReference.generatorAvailable ||
+                      !tool.symfonyWiringReference.autoloadAvailable) ? (
                       <p className="text-muted-foreground">
                         Install the generator and project dependencies before generating references.
                       </p>

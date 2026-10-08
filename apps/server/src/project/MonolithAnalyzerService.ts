@@ -142,6 +142,7 @@ const make = Effect.gen(function* () {
     const diagnostics: MonolithAnalyzerDiagnostic[] = [];
     const runs: MonolithAnalyzerRun[] = [];
     let insights: PhpInsightsExecution.PhpInsightsResult | undefined;
+    const configuredArea = snapshot.config.areas.find((candidate) => candidate.id === area?.id);
     if (area !== null && area.kind !== "folder") {
       const tool = area.kind === "php" ? "mago" : "biome";
       const applicable =
@@ -157,13 +158,15 @@ const make = Effect.gen(function* () {
                 new MonolithAnalyzerError({ operation: "check", reason: "discovery", cause }),
             ),
           );
+        const runtime = tool === "mago" ? configuredArea?.magoDocker : undefined;
         const installation =
-          installations[0]?.tools.find((candidate) => candidate.available) ??
-          installations[0]?.tools[0];
+          (!runtime
+            ? installations[0]?.tools.find((candidate) => candidate.available)
+            : undefined) ?? installations[0]?.tools[0];
         const operations =
           tool === "mago" ? (["format", "analyze", "guard"] as const) : (["check"] as const);
         for (const operation of operations) {
-          if (!installation?.available) {
+          if (!installation || (!installation.available && !runtime)) {
             runs.push({
               tool,
               operation,
@@ -186,6 +189,7 @@ const make = Effect.gen(function* () {
               workspaceRoot: root,
               filePath: file,
               sourceText: contents,
+              ...(runtime ? { runtime, areaPath: area.path } : {}),
               ...(configPath === undefined ? {} : { configPath: path.resolve(root, configPath) }),
             })
             .pipe(Effect.result);
@@ -210,15 +214,23 @@ const make = Effect.gen(function* () {
         if (tool === "mago") {
           const insightTools = installations[0]?.tools ?? [];
           const doctrine = insightTools.find(
-            (candidate) => candidate.doctrineQueryBudget?.available,
+            (candidate) =>
+              candidate.doctrineQueryBudget && (runtime || candidate.doctrineQueryBudget.available),
           )?.doctrineQueryBudget;
           const architecture = insightTools.find(
-            (candidate) => candidate.architectureGraph?.available,
+            (candidate) =>
+              candidate.architectureGraph && (runtime || candidate.architectureGraph.available),
           )?.architectureGraph;
           const reference = insightTools.find(
-            (candidate) => candidate.symfonyWiringReference?.referenceAvailable,
+            (candidate) =>
+              candidate.symfonyWiringReference &&
+              (runtime || candidate.symfonyWiringReference.referenceAvailable),
           )?.symfonyWiringReference;
-          if (!installation?.available || (!doctrine?.available && !architecture?.available)) {
+          if (
+            !installation ||
+            (!installation.available && !runtime) ||
+            (!doctrine && !architecture)
+          ) {
             insights = {
               queryBudget: {
                 status: "unavailable",
@@ -237,7 +249,9 @@ const make = Effect.gen(function* () {
                 [
                   doctrine?.autoloadPath,
                   architecture?.autoloadPath,
-                  reference?.autoloadAvailable ? reference.autoloadPath : undefined,
+                  reference && (runtime || reference.autoloadAvailable)
+                    ? reference.autoloadPath
+                    : undefined,
                 ].filter((value): value is string => value !== undefined),
               ),
             ].map((file) => path.resolve(root, file));
@@ -254,8 +268,9 @@ const make = Effect.gen(function* () {
                 filePath: file,
                 relativePath: input.path,
                 autoloadPaths,
+                ...(runtime ? { runtime } : {}),
                 ...(configPath ? { configPath: path.resolve(root, configPath) } : {}),
-                ...(reference?.referenceAvailable
+                ...(reference && (runtime || reference.referenceAvailable)
                   ? { referencePath: path.resolve(root, reference.referencePath) }
                   : {}),
                 ...(snapshot.config.areas.find((candidate) => candidate.id === area.id)

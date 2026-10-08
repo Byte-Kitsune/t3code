@@ -17,6 +17,8 @@ import {
   reconcileMonolithAreaDraft,
   normalizeMonolithAreaPath,
   validateMonolithAreas,
+  editMonolithMagoDocker,
+  normalizeMonolithMagoDocker,
 } from "./MonolithAreasPanel.logic";
 import { SettingsSection } from "./settingsLayout";
 
@@ -31,17 +33,20 @@ export function MonolithAreasPanel({
   projectId,
   cwd,
   checkoutLabel,
+  sectionId,
 }: {
   environmentId: EnvironmentId;
   projectId: ProjectId;
   cwd: string;
   checkoutLabel?: string;
+  sectionId?: string;
 }) {
   const clone = useProjectClone(scopeProjectRef(environmentId, projectId));
   const awaitingClone = clone !== null && clone.phase !== "done";
   const state = useMonolithAreas(environmentId, awaitingClone ? null : cwd);
   return (
     <SettingsSection
+      id={sectionId}
       title={checkoutLabel ? `Monolith areas · ${checkoutLabel}` : "Monolith areas"}
       icon={<FolderIcon className="size-4" />}
     >
@@ -162,6 +167,7 @@ function MonolithAreaEditor({
       areas: areas.map((area) => ({
         ...area,
         name: area.name.trim(),
+        ...(area.magoDocker ? { magoDocker: normalizeMonolithMagoDocker(area.magoDocker) } : {}),
         path: normalizeMonolithAreaPath(area.path)!,
         ...(area.entrypointPaths
           ? {
@@ -268,6 +274,88 @@ function MonolithAreaEditor({
                 </Select>
               </div>
             </div>
+            {area.kind === "php" ? (
+              <div className="space-y-2">
+                <label className="block space-y-1 text-xs">
+                  <span>Mago Compose service</span>
+                  <Input
+                    size="sm"
+                    font="mono"
+                    disabled={disabled}
+                    aria-label={`Area ${index + 1} Mago Compose service`}
+                    value={area.magoDocker?.service ?? ""}
+                    placeholder="php"
+                    onChange={(event) => {
+                      const value = event.currentTarget.value;
+                      setSaved(false);
+                      setAreas((current) =>
+                        current.map((entry) =>
+                          entry.id === area.id
+                            ? editMonolithMagoDocker(entry, "service", value)
+                            : entry,
+                        ),
+                      );
+                    }}
+                  />
+                  <p className="text-muted-foreground">
+                    Run Mago in this existing Docker Compose service. Blank uses local execution.
+                  </p>
+                </label>
+                {area.magoDocker ? (
+                  <details>
+                    <summary className="cursor-pointer text-xs">Docker paths (optional)</summary>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                      {(
+                        [
+                          {
+                            field: "composeDirectory",
+                            label: "Compose folder",
+                            placeholder: "Auto-detect nearest Compose folder",
+                            hint: "Relative to the repository root.",
+                          },
+                          {
+                            field: "containerPath",
+                            label: "PHP area in container",
+                            placeholder: "Auto-detect bind mount",
+                            hint: "Absolute path of this PHP area inside the container.",
+                          },
+                          {
+                            field: "binary",
+                            label: "Mago executable",
+                            placeholder: "Auto-detect vendor Mago or mago",
+                            hint: "One executable path; arguments are not accepted.",
+                          },
+                        ] as const
+                      ).map(({ field, label, placeholder, hint }) => (
+                        <label key={field} className="block space-y-1 text-xs">
+                          <span>{label}</span>
+                          <Input
+                            size="sm"
+                            font="mono"
+                            disabled={disabled}
+                            aria-label={`Area ${index + 1} ${label}`}
+                            value={area.magoDocker?.[field] ?? ""}
+                            placeholder={placeholder}
+                            onChange={(event) => {
+                              const value = event.currentTarget.value;
+                              setSaved(false);
+                              setAreas((current) =>
+                                current.map((entry) =>
+                                  entry.id === area.id
+                                    ? editMonolithMagoDocker(entry, field, value)
+                                    : entry,
+                                ),
+                              );
+                            }}
+                          />
+                          <p className="text-muted-foreground">{hint}</p>
+                        </label>
+                      ))}
+                    </div>
+                  </details>
+                ) : null}
+              </div>
+            ) : null}
             {area.kind === "php" ? (
               <label className="block space-y-1 text-xs">
                 <span>Fallback entry folders</span>

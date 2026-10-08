@@ -6,6 +6,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProcessRunner from "../processRunner.ts";
+import * as MagoDockerExecution from "../analyzers/MagoDockerExecution.ts";
 import * as AnalyzerDiscoveryService from "./AnalyzerDiscoveryService.ts";
 import * as MonolithService from "./MonolithService.ts";
 import * as SymfonyReferenceService from "./SymfonyReferenceService.ts";
@@ -45,6 +46,7 @@ const runWith = (
   cwd: string,
   calls: Array<ProcessRunner.ProcessRunInput>,
   outputs: ReadonlyArray<{ stdout: string; code?: number }>,
+  docker?: MagoDockerExecution.MagoDockerExecution["Service"],
 ) => {
   const runner = ProcessRunner.ProcessRunner.of({
     run: (input) => {
@@ -71,12 +73,155 @@ const runWith = (
     Effect.provide(
       SymfonyReferenceService.layer.pipe(
         Layer.provide(Layer.succeed(ProcessRunner.ProcessRunner, runner)),
+        Layer.provide(
+          Layer.succeed(
+            MagoDockerExecution.MagoDockerExecution,
+            docker ??
+              MagoDockerExecution.MagoDockerExecution.of({
+                prepare: () => Effect.die("Unexpected Docker process"),
+              }),
+          ),
+        ),
       ),
     ),
   );
 };
 
 it.layer(base)("SymfonyReferenceService", (it) => {
+  it.effect("exports through container PHP and stages JSON when host vendor is absent", () =>
+    Effect.gen(function* () {
+      const root = yield* fixture;
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.remove(`${root}/api/vendor`, { recursive: true });
+      yield* fs.remove(`${root}/api/tools/vendor`, { recursive: true });
+      yield* write(
+        root,
+        "t3.monolith.json",
+        JSON.stringify({
+          version: 1,
+          initialized: true,
+          areas: [
+            {
+              id: "php:api",
+              name: "API",
+              path: "api",
+              kind: "php",
+              magoDocker: { service: "php" },
+            },
+          ],
+        }),
+      );
+      const calls: Array<ProcessRunner.ProcessRunInput> = [];
+      const remoteCalls: { args: readonly string[]; env?: NodeJS.ProcessEnv }[] = [];
+      const staged = new Map<string, string>();
+      let removed = false;
+      const transport = MagoDockerExecution.MagoDockerExecution.of({
+        prepare: (input) => {
+          expect(input.runtime.service).toBe("php");
+          expect(input.areaPath).toBe("api");
+          return Effect.succeed({
+            hostAreaRoot: `${root}/api`,
+            containerAreaRoot: "/srv/api",
+            toContainer: (path) => path.replace(root, "/srv"),
+            toHost: (path) => path.replace("/srv", root),
+            runMago: () => Effect.die("Unexpected Mago process"),
+            exists: () => Effect.succeed(true),
+            allocateTemp: Effect.acquireRelease(
+              Effect.succeed({
+                path: "/tmp/t3-reference",
+                write: (name, content) =>
+                  Effect.sync(() => {
+                    staged.set(name, content);
+                  }),
+                read: () => Effect.die("Unexpected staged read"),
+              }),
+              () =>
+                Effect.sync(() => {
+                  removed = true;
+                }),
+            ),
+            runPhp: (args, env) => {
+              remoteCalls.push({ args, ...(env ? { env } : {}) });
+              return Effect.succeed({
+                stdout: remoteCalls.length === 3 ? '{"reference":"container"}' : "{}",
+                stderr: "",
+                code: ChildProcessSpawner.ExitCode(0),
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+                stdoutInvalidUtf8: false,
+                stderrInvalidUtf8: false,
+              });
+            },
+          });
+        },
+      });
+      const result = yield* runWith(root, calls, [], transport);
+      expect(calls).toEqual([]);
+      expect(remoteCalls).toHaveLength(3);
+      expect(remoteCalls[0]!.args[0]).toBe("/srv/api/bin/console");
+      expect(remoteCalls[2]!.args).toEqual([
+        "/srv/api/tools/vendor/byte-kitsune/mago-symfony-wiring/bin/create-container-reference.php",
+        "--types=/tmp/t3-reference/types.json",
+        "--services=/tmp/t3-reference/services.json",
+        "--autoload=/srv/api/vendor/autoload.php",
+      ]);
+      expect(staged).toEqual(
+        new Map([
+          ["types.json", "{}"],
+          ["services.json", "{}"],
+        ]),
+      );
+      expect(removed).toBe(true);
+      expect(yield* fs.readFileString(`${root}/${result.path}`)).toBe(
+        '{"reference":"container"}\n',
+      );
+    }),
+  );
+
+  it.effect(
+    "keeps the previous reference when the configured container service is unavailable",
+    () =>
+      Effect.gen(function* () {
+        const root = yield* fixture;
+        yield* write(
+          root,
+          "t3.monolith.json",
+          JSON.stringify({
+            version: 1,
+            initialized: true,
+            areas: [
+              {
+                id: "php:api",
+                name: "API",
+                path: "api",
+                kind: "php",
+                magoDocker: { service: "php" },
+              },
+            ],
+          }),
+        );
+        const calls: Array<ProcessRunner.ProcessRunInput> = [];
+        const error = yield* runWith(
+          root,
+          calls,
+          [],
+          MagoDockerExecution.MagoDockerExecution.of({
+            prepare: () =>
+              Effect.fail(new MagoDockerExecution.MagoDockerError({ stage: "service" })),
+          }),
+        ).pipe(Effect.flip);
+        expect(error.stage).toBe("prerequisites");
+        expect(error.message).toContain("Start the configured Docker Compose service");
+        expect(calls).toEqual([]);
+        expect(
+          yield* (yield* FileSystem.FileSystem).readFileString(
+            `${root}/api/.mago/container-reference.dev.json`,
+          ),
+        ).toBe('{"previous":true}');
+      }),
+  );
+
   it.effect(
     "exports dev types and services through direct PHP commands and atomically replaces the reference",
     () =>

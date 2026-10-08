@@ -4,6 +4,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProcessRunner from "../processRunner.ts";
+import * as MagoDockerExecution from "./MagoDockerExecution.ts";
 import * as AnalyzerExecution from "./AnalyzerExecution.ts";
 
 const base = {
@@ -20,6 +21,7 @@ function runWith(
   code = 0,
   input: AnalyzerExecution.AnalyzerExecutionInput = base,
   overrides: Partial<ProcessRunner.ProcessRunOutput> = {},
+  docker?: MagoDockerExecution.MagoDockerExecution["Service"],
 ) {
   const calls: ProcessRunner.ProcessRunInput[] = [];
   const runner = ProcessRunner.ProcessRunner.of({
@@ -44,7 +46,13 @@ function runWith(
   }).pipe(
     Effect.provide(
       AnalyzerExecution.layer.pipe(
-        Layer.provide(Layer.merge(Path.layer, Layer.succeed(ProcessRunner.ProcessRunner, runner))),
+        Layer.provide(
+          Layer.mergeAll(
+            Path.layer,
+            Layer.succeed(ProcessRunner.ProcessRunner, runner),
+            ...(docker ? [Layer.succeed(MagoDockerExecution.MagoDockerExecution, docker)] : []),
+          ),
+        ),
       ),
     ),
   );
@@ -270,3 +278,67 @@ describe("AnalyzerExecution", () => {
     }),
   );
 });
+
+it.effect(
+  "runs Docker Mago without a host binary and maps container diagnostics to the opened checkout file",
+  () =>
+    Effect.gen(function* () {
+      const captured: string[][] = [];
+      const resultOutput = {
+        stdout: JSON.stringify({
+          issues: [
+            issue("/srv/api/src/Test.php"),
+            issue("src/Other.php"),
+            issue("/opt/vendor/Library.php"),
+          ],
+        }),
+        stderr: "",
+        code: ChildProcessSpawner.ExitCode(1),
+        timedOut: false,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        stdoutInvalidUtf8: false,
+        stderrInvalidUtf8: false,
+      };
+      const docker = MagoDockerExecution.MagoDockerExecution.of({
+        prepare: (request) => {
+          expect(request.areaPath).toBe("app");
+          return Effect.succeed({
+            hostAreaRoot: "/repo/app",
+            containerAreaRoot: "/srv/api",
+            toContainer: (path) => path.replace("/repo/app", "/srv/api"),
+            toHost: (path) => {
+              if (!path.startsWith("/srv/api/")) throw new Error("Outside mount");
+              return path.replace("/srv/api", "/repo/app");
+            },
+            runMago: (args) => {
+              captured.push([...args]);
+              return Effect.succeed(resultOutput);
+            },
+            runPhp: () => Effect.die("Unused"),
+            exists: () => Effect.succeed(true),
+            allocateTemp: Effect.die("Unused"),
+          });
+        },
+      });
+      const { effect, calls: hostCalls } = runWith(
+        "",
+        0,
+        {
+          ...base,
+          command: "mago",
+          configPath: "/repo/app/mago.toml",
+          areaPath: "app",
+          runtime: { service: "php" },
+        },
+        {},
+        docker,
+      );
+      const result = yield* effect;
+      expect(result.diagnostics).toHaveLength(1);
+      expect(result.diagnostics[0]!.path).toBe("app/src/Test.php");
+      expect(captured[0]).toContain("/srv/api/mago.toml");
+      expect(captured[0]).not.toContain("/srv/api/src/Test.php");
+      expect(hostCalls).toEqual([]);
+    }),
+);

@@ -6,6 +6,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProcessRunner from "../processRunner.ts";
+import * as MagoDockerExecution from "./MagoDockerExecution.ts";
 import * as PhpInsightsExecution from "./PhpInsightsExecution.ts";
 
 const encode = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -213,5 +214,136 @@ it.effect(
       if (result._tag === "Failure") expect(result.failure.stage).toBe("workspace");
       expect(mock.calls).toHaveLength(1);
       expect(mock.calls[0]?.args).not.toContain("--workspace");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["missing", "stable", "changed"] as const)(
+  "stages Docker workers without host vendor and handles %s container references",
+  (referenceState) =>
+    Effect.gen(function* () {
+      const input = yield* setup;
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.remove(`${input.workspaceRoot}/app/tools`, { recursive: true });
+      const files = new Map<string, string>();
+      const captured: string[][] = [];
+      let cleanup = false;
+      let hashCalls = 0;
+      const areaRoot = `${input.workspaceRoot}/app`;
+      const docker = MagoDockerExecution.MagoDockerExecution.of({
+        prepare: () =>
+          Effect.succeed({
+            hostAreaRoot: areaRoot,
+            containerAreaRoot: "/srv/api",
+            toContainer: (path) => path.replace(areaRoot, "/srv/api"),
+            toHost: (path) => path.replace("/srv/api", areaRoot),
+            exists: () => Effect.succeed(referenceState !== "missing"),
+            runPhp: () =>
+              Effect.sync(() => {
+                if (referenceState === "missing")
+                  throw new Error("Absent optional reference must not be hashed");
+                hashCalls++;
+                return output(
+                  (referenceState === "changed" && hashCalls > 1 ? "b" : "a").repeat(64),
+                );
+              }),
+            allocateTemp: Effect.acquireRelease(
+              Effect.succeed({
+                path: "/tmp/t3-insights-fixture",
+                write: (name: string, contents: string) =>
+                  Effect.sync(() => {
+                    files.set(name, contents);
+                  }),
+                read: (name: string, max?: number) =>
+                  Effect.sync(() => {
+                    expect(max).toBe(16 * 1024 * 1024);
+                    return files.get(name)!;
+                  }),
+              }),
+              () =>
+                Effect.sync(() => {
+                  cleanup = true;
+                }),
+            ),
+            runMago: (args, env) =>
+              Effect.sync(() => {
+                captured.push([...args]);
+                if (args.includes("config"))
+                  return output(
+                    encode({
+                      source: { workspace: "/srv/api", paths: ["src"] },
+                      analyzer: {},
+                      threads: 8,
+                    }),
+                  );
+                expect(env?.T3_PHP_INSIGHTS_INPUT).toBe("/tmp/t3-insights-fixture/input.json");
+                const workerInput = decode(files.get("input.json")!) as Record<string, unknown>;
+                expect(workerInput.filePath).toBe("/srv/api/src/Test.php");
+                expect(workerInput.projectRoot).toBe("/srv/api");
+                expect(workerInput.autoloadPaths).toEqual(["/srv/api/tools/vendor/autoload.php"]);
+                expect(workerInput.referencePath).toBe(
+                  referenceState === "missing"
+                    ? null
+                    : "/srv/api/.mago/container-reference.dev.json",
+                );
+                expect(workerInput.queryOutput).toBe("/tmp/t3-insights-fixture/queries.json");
+                const config = decode(files.get("mago.json")!) as Record<string, unknown>;
+                expect(config.source).toMatchObject({ workspace: "/srv/api", paths: ["src"] });
+                files.set(
+                  "queries.json",
+                  encode({
+                    status: "complete",
+                    methods: [
+                      {
+                        symbol: "Test::load",
+                        path: "app/src/Test.php",
+                        line: 1,
+                        lowerBound: 0,
+                        upperBound: 0,
+                        unknown: [],
+                        cycles: [],
+                      },
+                    ],
+                  }),
+                );
+                files.set(
+                  "graph.json",
+                  encode({ status: "unavailable", message: "No graph installed" }),
+                );
+                return output('{"issues":[]}');
+              }),
+          }),
+      });
+      const forbiddenRunner = ProcessRunner.ProcessRunner.of({
+        run: () => Effect.die("Host Mago must not execute"),
+      });
+      const result = yield* Effect.flatMap(PhpInsightsExecution.PhpInsightsExecution, (service) =>
+        service.run({
+          ...input,
+          runtime: { service: "php" },
+          referencePath: `${areaRoot}/.mago/container-reference.dev.json`,
+        }),
+      ).pipe(
+        Effect.provide(
+          PhpInsightsExecution.layer.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                NodeServices.layer,
+                Layer.succeed(ProcessRunner.ProcessRunner, forbiddenRunner),
+                Layer.succeed(MagoDockerExecution.MagoDockerExecution, docker),
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(result.queryBudget.status).toBe(referenceState === "changed" ? "failed" : "complete");
+      if (referenceState === "changed") expect(result.queryBudget.methods).toEqual([]);
+      else expect(result.queryBudget.methods[0]?.upperBound).toBe(0);
+      expect(result.entryChains.status).toBe(
+        referenceState === "changed" ? "failed" : "unavailable",
+      );
+      expect(captured[0]).toContain("/srv/api/mago.toml");
+      expect(captured[1]).toContain("/tmp/t3-insights-fixture/mago.json");
+      expect(captured[1]).toContain("/srv/api");
+      expect(cleanup).toBe(true);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

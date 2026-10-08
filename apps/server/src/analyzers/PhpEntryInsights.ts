@@ -51,6 +51,14 @@ function text(value: unknown, max = 4096): string {
     throw new Error("Invalid graph text.");
   return value;
 }
+function opaqueId(value: unknown): string {
+  // The extension separates a method from its service instance with NUL.
+  // Opaque identities are encoded consistently on nodes and edges before they
+  // cross the wire; source paths, symbols and labels keep their strict guards.
+  if (typeof value !== "string" || value.length === 0 || value.length > 4096)
+    throw new Error("Invalid graph node identity.");
+  return encodeURIComponent(value);
+}
 function position(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1)
     throw new Error("Invalid graph source position.");
@@ -103,7 +111,7 @@ export function normalizePhpEntryInsightsReport(
   const nodes = new Map<string, GraphNode>();
   for (const value of list(snapshot.nodes, 50_000)) {
     const node = object(value);
-    const id = text(node.id);
+    const id = opaqueId(node.id);
     if (nodes.has(id)) throw new Error("Duplicate graph node identity.");
     nodes.set(id, {
       id,
@@ -118,8 +126,8 @@ export function normalizePhpEntryInsightsReport(
   const reverse = new Map<string, GraphEdge[]>();
   for (const value of list(snapshot.edges, 250_000)) {
     const edge = object(value);
-    const from = text(edge.from);
-    const to = text(edge.to);
+    const from = opaqueId(edge.from);
+    const to = opaqueId(edge.to);
     const path = relativePath(edge.path);
     if (!nodes.has(from) || !nodes.has(to) || nodes.get(from)!.path !== path)
       throw new Error("Graph edge has no unique source/target declaration.");

@@ -32,6 +32,66 @@ const area = (kind: "php" | "react" | "folder", path: string): MonolithArea => (
 });
 
 it.layer(layerTest)("AnalyzerDiscoveryService", (it) => {
+  it.effect("keeps container Composer paths when vendor is absent from the host", () =>
+    Effect.gen(function* () {
+      const root = yield* temporaryRoot;
+      yield* write(root, "artifact/api/composer.json", { require: { php: "^8.2" } });
+      yield* write(root, "artifact/api/tools/composer.json", {
+        require: {
+          "carthage-software/mago": "*",
+          "byte-kitsune/mago-doctrine-query-budget": "*",
+          "byte-kitsune/mago-architecture-graph": "*",
+          "byte-kitsune/mago-symfony-wiring": "*",
+        },
+      });
+      const service = yield* AnalyzerDiscoveryService.AnalyzerDiscoveryService;
+      const tools = (yield* service.discover({
+        cwd: root,
+        areas: [{ ...area("php", "artifact/api"), magoDocker: { service: "php" } }],
+      }))[0]!.tools;
+      expect(tools).toHaveLength(1);
+      expect(tools[0]).toMatchObject({
+        available: false,
+        binaryPath: "artifact/api/tools/vendor/bin/mago",
+        doctrineQueryBudget: {
+          autoloadPath: "artifact/api/tools/vendor/autoload.php",
+          available: false,
+        },
+        architectureGraph: {
+          autoloadPath: "artifact/api/tools/vendor/autoload.php",
+          available: false,
+        },
+        symfonyWiringReference: {
+          generatorAvailable: false,
+          autoloadAvailable: false,
+          generatorPath:
+            "artifact/api/tools/vendor/byte-kitsune/mago-symfony-wiring/bin/create-container-reference.php",
+          autoloadPath: "artifact/api/vendor/autoload.php",
+        },
+      });
+    }),
+  );
+  it.effect("offers a configured Docker runtime without a local Mago dependency", () =>
+    Effect.gen(function* () {
+      const root = yield* temporaryRoot;
+      yield* write(root, "api/composer.json", { require: { php: "^8.2" } });
+      yield* write(root, "api/mago.toml", "[source]\npaths=['src']");
+      const service = yield* AnalyzerDiscoveryService.AnalyzerDiscoveryService;
+      const result = (yield* service.discover({
+        cwd: root,
+        areas: [{ ...area("php", "api"), magoDocker: { service: "php", binary: "mago" } }],
+      }))[0]!;
+      expect(result.tools).toHaveLength(1);
+      expect(result.tools[0]).toMatchObject({
+        available: false,
+        configPath: "api/mago.toml",
+        binaryPath: "api/vendor/bin/mago",
+      });
+      const local = (yield* service.discover({ cwd: root, areas: [area("php", "api")] }))[0]!;
+      expect(local.tools).toHaveLength(0);
+    }),
+  );
+
   it.effect("discovers query-budget and graph packages from separate nested tools manifests", () =>
     Effect.gen(function* () {
       const root = yield* temporaryRoot;

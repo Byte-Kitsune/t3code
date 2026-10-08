@@ -49,6 +49,24 @@ describe("searchSettings", () => {
     expect(searchSettings(query).map((item) => item.id)).toContain("send-shortcut");
   });
 
+  it.each([
+    ["Monolith areas", "monolith-areas"],
+    ["Docker Compose service", "monolith-areas"],
+    ["file analyzers", "file-analyzers"],
+    ["Doctrine query budget", "file-analyzers"],
+    ["Symfony entry chains", "file-analyzers"],
+  ])("finds project analysis settings for %s without selecting a project first", (query, id) => {
+    expect(searchSettings(query)[0]).toMatchObject({
+      id,
+      to: "/settings/projects",
+      scope: "project",
+    });
+    expect(getSettingsSearchTargetScope(id)).toMatchObject({ scope: "project" });
+    expect(isSettingsSearchScopeAvailable("project", "project")).toBe(true);
+    expect(isSettingsSearchScopeAvailable("project", "checkout")).toBe(true);
+    expect(isSettingsSearchScopeAvailable("project", "all")).toBe(false);
+  });
+
   it("matches titles, sections, and remembered setting details", () => {
     expect(searchSettings("word", ITEMS).map((item) => item.id)).toEqual(["word-wrap"]);
     expect(searchSettings("network", ITEMS).map((item) => item.id)).toEqual(["network-access"]);
@@ -545,9 +563,10 @@ describe("auto-settlement search availability", () => {
 });
 
 describe("settings sidebar scope", () => {
-  it("shows Overview only for project and checkout targets", () => {
-    expect(isSettingsOverviewVisible({})).toBe(false);
-    expect(isSettingsOverviewVisible({ machine: "remote" })).toBe(false);
+  it("keeps Project discoverable before selecting a project and rejects malformed checkout scopes", () => {
+    expect(isSettingsOverviewVisible({})).toBe(true);
+    expect(isSettingsOverviewVisible({ machine: "remote" })).toBe(true);
+    expect(isSettingsOverviewVisible({ checkout: "checkout" })).toBe(false);
     expect(isSettingsOverviewVisible({ project: "project" })).toBe(true);
     expect(isSettingsOverviewVisible({ project: "project", checkout: "checkout" })).toBe(true);
   });

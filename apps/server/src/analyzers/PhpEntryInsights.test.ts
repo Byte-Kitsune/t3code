@@ -128,6 +128,27 @@ describe("full PHP entry call graph", () => {
       ["service-other", "processor.other"],
     ]);
   });
+  it("accepts internal NUL service identities while keeping navigable text strict", () => {
+    const report = graph();
+    const entryId = "app\\controller::index\0controller.http";
+    const repositoryId = "app\\repository::find\0repository.safe";
+    report.snapshot.nodes[0]!.id = entryId;
+    report.snapshot.nodes[2]!.id = repositoryId;
+    Object.assign(report.snapshot.nodes[0]!, { service_id: "controller.http" });
+    Object.assign(report.snapshot.nodes[2]!, { service_id: "repository.safe" });
+    report.snapshot.edges[0]!.from = entryId;
+    report.snapshot.edges[1]!.to = repositoryId;
+    const result = normalizePhpEntryInsightsReport(report, "src/Repository.php");
+    expect(result.status).toBe("complete");
+    expect(result.targets[0]!.id).toBe(encodeURIComponent(repositoryId));
+    expect(result.targets[0]!.serviceId).toBe("repository.safe");
+    expect(result.targets[0]!.entries[0]!.entry.id).toBe(encodeURIComponent(entryId));
+    expect(result.targets[0]!.entries[0]!.entry.serviceId).toBe("controller.http");
+    report.snapshot.nodes[2]!.path = "src/Bad\0Path.php";
+    expect(() => normalizePhpEntryInsightsReport(report, "src/Repository.php")).toThrow(
+      "Invalid graph text",
+    );
+  });
   it("returns one deterministic shortest path even with a second route", () => {
     const report = graph();
     report.snapshot.edges.push({

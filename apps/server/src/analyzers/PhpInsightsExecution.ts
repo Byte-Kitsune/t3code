@@ -1,4 +1,8 @@
-import type { MonolithEntryChains, MonolithQueryBudget } from "@t3tools/contracts";
+import type {
+  MonolithEntryChains,
+  MonolithQueryBudget,
+  MonolithMagoDocker,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -6,10 +10,13 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as MagoDockerExecution from "./MagoDockerExecution.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { decodePhpQueryInsights } from "./PhpQueryInsights.ts";
 import { normalizePhpEntryInsightsReport } from "./PhpEntryInsights.ts";
 import { PHP_INSIGHTS_WORKER_SOURCE } from "./PhpInsightsWorkerSource.ts";
+
+const isDockerError = Schema.is(MagoDockerExecution.MagoDockerError);
 
 export interface PhpInsightsInput {
   readonly command: string;
@@ -22,6 +29,7 @@ export interface PhpInsightsInput {
   readonly autoloadPaths: readonly string[];
   readonly referencePath?: string;
   readonly entrypointPaths?: readonly string[];
+  readonly runtime?: MonolithMagoDocker;
 }
 export interface PhpInsightsResult {
   readonly queryBudget: MonolithQueryBudget;
@@ -35,6 +43,7 @@ export class PhpInsightsExecutionError extends Schema.TaggedError<PhpInsightsExe
   },
 ) {
   override get message(): string {
+    if (isDockerError(this.cause)) return this.cause.message;
     if (this.stage === "workspace")
       return "PHP insights require the Mago workspace to match the PHP area's root. Adjust the area or its Mago workspace to refresh insights.";
     return `PHP file insights could not complete (${this.stage}).`;
@@ -60,6 +69,7 @@ const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const paths = yield* Path.Path;
   const runner = yield* ProcessRunner.ProcessRunner;
+  const dockerService = yield* Effect.serviceOption(MagoDockerExecution.MagoDockerExecution);
   const run = Effect.fn("PhpInsightsExecution.run")(function* (input: PhpInsightsInput) {
     const areaRoot = paths.resolve(input.workspaceRoot, input.areaPath);
     const within = (target: string, root = input.workspaceRoot) => {
@@ -69,7 +79,7 @@ const make = Effect.gen(function* () {
       );
     };
     if (
-      !paths.isAbsolute(input.command) ||
+      (!input.runtime && !paths.isAbsolute(input.command)) ||
       !paths.isAbsolute(input.cwd) ||
       !paths.isAbsolute(input.workspaceRoot) ||
       !within(areaRoot) ||
@@ -83,27 +93,77 @@ const make = Effect.gen(function* () {
     });
     yield* Effect.gen(function* () {
       for (const target of [
-        input.command,
+        ...(input.runtime ? [] : [input.command]),
         input.cwd,
         areaRoot,
         input.filePath,
-        ...input.autoloadPaths,
+        ...(input.runtime ? [] : input.autoloadPaths),
         ...(input.configPath ? [input.configPath] : []),
-        ...(input.referencePath ? [input.referencePath] : []),
+        ...(!input.runtime && input.referencePath ? [input.referencePath] : []),
       ])
         yield* safe(target);
     }).pipe(Effect.mapError((cause) => new PhpInsightsExecutionError({ stage: "input", cause })));
+    const docker = input.runtime
+      ? yield* Effect.gen(function* () {
+          if (Option.isNone(dockerService))
+            return yield* new PhpInsightsExecutionError({ stage: "input" });
+          return yield* dockerService.value
+            .prepare({
+              workspaceRoot: input.workspaceRoot,
+              areaPath: input.areaPath,
+              runtime: input.runtime!,
+              binaryPath: input.command,
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) => new PhpInsightsExecutionError({ stage: "process", cause }),
+              ),
+            );
+        })
+      : undefined;
+    const toolPath = (hostPath: string) => docker?.toContainer(hostPath) ?? hostPath;
+    yield* Effect.try({
+      try: () =>
+        [
+          areaRoot,
+          input.filePath,
+          ...input.autoloadPaths,
+          ...(input.configPath ? [input.configPath] : []),
+          ...(input.referencePath ? [input.referencePath] : []),
+        ].forEach(toolPath),
+      catch: (cause) => new PhpInsightsExecutionError({ stage: "input", cause }),
+    });
+    const referencePath =
+      input.referencePath && (!docker || (yield* docker.exists(input.referencePath)))
+        ? input.referencePath
+        : undefined;
+    const referenceOnHost = referencePath !== undefined && (yield* fs.exists(referencePath));
+    if (referenceOnHost) yield* safe(referencePath!);
+    const remoteReferenceStamp = Effect.fnUntraced(function* () {
+      if (!docker || !referencePath || referenceOnHost) return null;
+      const result = yield* docker.runPhp([
+        "-r",
+        "echo hash_file('sha256', $argv[1]);",
+        toolPath(referencePath),
+      ]);
+      if (result.code !== 0 || !/^[a-f0-9]{64}$/.test(result.stdout))
+        return yield* new PhpInsightsExecutionError({ stage: "process" });
+      return result.stdout;
+    });
+    const initialRemoteReference = yield* remoteReferenceStamp();
     const process = Effect.fnUntraced(function* (args: readonly string[], env?: NodeJS.ProcessEnv) {
-      const result = yield* runner.run({
-        command: input.command,
-        args,
-        cwd: input.cwd,
-        env: env ?? { ...globalThis.process.env, NO_COLOR: "1" },
-        timeout: 60_000,
-        maxOutputBytes: 4_000_000,
-        outputMode: "error",
-        timeoutBehavior: "error",
-      });
+      const result = yield* docker
+        ? docker.runMago(args, env)
+        : runner.run({
+            command: input.command,
+            args,
+            cwd: input.cwd,
+            env: env ?? { ...globalThis.process.env, NO_COLOR: "1" },
+            timeout: 60_000,
+            maxOutputBytes: 4_000_000,
+            outputMode: "error",
+            timeoutBehavior: "error",
+          });
       if (
         result.code === null ||
         result.code > 1 ||
@@ -155,7 +215,7 @@ const make = Effect.gen(function* () {
           )
       : null;
     const effective = yield* process([
-      ...(input.configPath ? ["--config", input.configPath] : []),
+      ...(input.configPath ? ["--config", toolPath(input.configPath)] : []),
       "config",
       "--no-extensions",
     ]).pipe(
@@ -168,35 +228,52 @@ const make = Effect.gen(function* () {
     );
     // SDK paths are relative to Mago's workspace. Never silently reinterpret a
     // configured workspace as area-relative source or navigate to the wrong file.
-    if (
-      paths.resolve(
-        input.cwd,
-        typeof sourceConfig.workspace === "string" ? sourceConfig.workspace : input.cwd,
-      ) !== areaRoot
-    )
+    const configuredWorkspace =
+      typeof sourceConfig.workspace === "string"
+        ? sourceConfig.workspace
+        : (docker?.containerAreaRoot ?? input.cwd);
+    const effectiveWorkspace = yield* Effect.try({
+      try: () =>
+        docker ? docker.toHost(configuredWorkspace) : paths.resolve(input.cwd, configuredWorkspace),
+      catch: (cause) => new PhpInsightsExecutionError({ stage: "workspace", cause }),
+    });
+    if (effectiveWorkspace !== areaRoot)
       return yield* new PhpInsightsExecutionError({ stage: "workspace" });
     const sourceExcludes = Array.isArray(sourceConfig.excludes)
       ? sourceConfig.excludes
           .filter((value): value is string => typeof value === "string" && !/[?*{}[\]]/.test(value))
-          .map((value) => paths.resolve(areaRoot, value))
+          .flatMap((value) => {
+            if (docker && value.startsWith("/")) {
+              try {
+                return [docker.toHost(value)];
+              } catch {
+                return [];
+              }
+            }
+            return [paths.resolve(areaRoot, value)];
+          })
       : [];
     const initialSource = yield* sourceStamp().pipe(
       Effect.mapError((cause) => new PhpInsightsExecutionError({ stage: "input", cause })),
     );
     return yield* Effect.scoped(
       Effect.gen(function* () {
-        const temp = yield* fs.makeTempDirectoryScoped({ prefix: "t3-php-insights-" });
-        const queryOutput = paths.join(temp, "queries.json");
-        const graphOutput = paths.join(temp, "graph.json");
-        const configPath = paths.join(temp, "mago.json");
-        const worker = paths.join(temp, "worker.php");
-        const inputPath = paths.join(temp, "input.json");
+        const dockerTemp = docker ? yield* docker.allocateTemp : undefined;
+        const temp =
+          dockerTemp?.path ?? (yield* fs.makeTempDirectoryScoped({ prefix: "t3-php-insights-" }));
+        const tempPath = (name: string) =>
+          dockerTemp ? `${temp}/${name}` : paths.join(temp, name);
+        const queryOutput = tempPath("queries.json");
+        const graphOutput = tempPath("graph.json");
+        const configPath = tempPath("mago.json");
+        const worker = tempPath("worker.php");
+        const inputPath = tempPath("input.json");
         const policyPath = paths.join(areaRoot, ".mago", "architecture-policy.json");
         const hasPolicy = yield* fs.exists(policyPath);
         if (hasPolicy) yield* safe(policyPath);
         const trackedPaths = [
           ...(input.configPath ? [input.configPath] : []),
-          ...(input.referencePath ? [input.referencePath] : []),
+          ...(referenceOnHost ? [referencePath!] : []),
           ...(hasPolicy ? [policyPath] : []),
         ];
         const tracked = yield* Effect.forEach(trackedPaths, (file) => fs.readFileString(file));
@@ -204,16 +281,16 @@ const make = Effect.gen(function* () {
         // during the config command cannot validate an older effective config.
         if (configurationBefore !== null) tracked[0] = configurationBefore;
         const workerInput = {
-          filePath: input.filePath,
+          filePath: toolPath(input.filePath),
           relativePath: input.relativePath,
           areaRelativePath: paths.relative(areaRoot, input.filePath).split(paths.sep).join("/"),
-          projectRoot: areaRoot,
-          cwd: areaRoot,
-          referencePath: input.referencePath ?? null,
-          autoloadPaths: input.autoloadPaths,
+          projectRoot: toolPath(areaRoot),
+          cwd: toolPath(areaRoot),
+          referencePath: referencePath ? toolPath(referencePath) : null,
+          autoloadPaths: input.autoloadPaths.map(toolPath),
           queryOutput,
           graphOutput,
-          architecturePolicyPath: hasPolicy ? policyPath : null,
+          architecturePolicyPath: hasPolicy ? toolPath(policyPath) : null,
           entrypointPaths: input.entrypointPaths ?? ["src/Controller", "src/Command"],
         };
         // Keep the effective project snapshot and replace workers only for this
@@ -228,15 +305,21 @@ const make = Effect.gen(function* () {
             plugins: [],
           },
         };
-        yield* fs.writeFileString(worker, PHP_INSIGHTS_WORKER_SOURCE);
-        yield* fs.writeFileString(inputPath, yield* encodeJson(workerInput));
-        yield* fs.writeFileString(configPath, yield* encodeJson(config));
+        if (dockerTemp) {
+          yield* dockerTemp.write("worker.php", PHP_INSIGHTS_WORKER_SOURCE);
+          yield* dockerTemp.write("input.json", yield* encodeJson(workerInput));
+          yield* dockerTemp.write("mago.json", yield* encodeJson(config));
+        } else {
+          yield* fs.writeFileString(worker, PHP_INSIGHTS_WORKER_SOURCE);
+          yield* fs.writeFileString(inputPath, yield* encodeJson(workerInput));
+          yield* fs.writeFileString(configPath, yield* encodeJson(config));
+        }
         yield* process(
           [
             "--config",
             configPath,
             "--workspace",
-            areaRoot,
+            toolPath(areaRoot),
             "analyze",
             "--reporting-format",
             "json",
@@ -250,6 +333,8 @@ const make = Effect.gen(function* () {
           Effect.mapError((cause) => new PhpInsightsExecutionError({ stage: "process", cause })),
         );
         const sidecar = Effect.fnUntraced(function* (file: string) {
+          if (dockerTemp)
+            return yield* dockerTemp.read(file.slice(temp.length + 1), 16 * 1024 * 1024);
           const info = yield* fs.stat(file);
           if (info.type !== "File" || info.size > 16 * 1024 * 1024)
             return yield* new PhpInsightsExecutionError({ stage: "report" });
@@ -258,7 +343,8 @@ const make = Effect.gen(function* () {
         const latest = yield* Effect.forEach(trackedPaths, (file) => fs.readFileString(file));
         if (
           tracked.some((content, index) => content !== latest[index]) ||
-          initialSource !== (yield* sourceStamp())
+          initialSource !== (yield* sourceStamp()) ||
+          initialRemoteReference !== (yield* remoteReferenceStamp())
         )
           return {
             queryBudget: {
@@ -314,6 +400,15 @@ const make = Effect.gen(function* () {
       ),
     );
   });
-  return PhpInsightsExecution.of({ run });
+  return PhpInsightsExecution.of({
+    run: (input) =>
+      run(input).pipe(
+        Effect.mapError((cause) =>
+          isInsightError(cause)
+            ? cause
+            : new PhpInsightsExecutionError({ stage: "process", cause }),
+        ),
+      ),
+  });
 });
 export const layer = Layer.effect(PhpInsightsExecution, make);

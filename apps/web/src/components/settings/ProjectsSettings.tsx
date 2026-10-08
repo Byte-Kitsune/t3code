@@ -28,7 +28,8 @@ export function ProjectsSettings() {
         </SettingsPageContainer>
       ) : (
         <SettingsScopeNotice target="project">
-          Choose a project to manage its name, icon, checkouts and actions.
+          Choose a project to manage its monolith areas, file analyzers, Docker Compose runtime,
+          checkouts and actions.
         </SettingsScopeNotice>
       )}
     </div>

@@ -8,12 +8,61 @@ import {
   reconcileMonolithAreaDraft,
   normalizeMonolithAreaPath,
   validateMonolithAreas,
+  editMonolithMagoDocker,
+  normalizeMonolithMagoDocker,
 } from "./MonolithAreasPanel.logic";
 
 const phpRoot: MonolithArea = { id: "php-root", name: "PHP", path: ".", kind: "php" };
 const config: MonolithConfig = { version: 1, initialized: true, areas: [phpRoot] };
 
 describe("Monolith area editing", () => {
+  it("enables Docker per PHP area, preserves overrides while renaming service and fully disables it when cleared", () => {
+    const enabled = editMonolithMagoDocker(phpRoot, "service", "php");
+    const custom = editMonolithMagoDocker(enabled, "containerPath", "/app");
+    const renamed = editMonolithMagoDocker(custom, "service", "php-dev");
+    expect(renamed.magoDocker).toEqual({ service: "php-dev", containerPath: "/app" });
+    expect(editMonolithMagoDocker(renamed, "containerPath", "").magoDocker).toEqual({
+      service: "php-dev",
+    });
+    expect(editMonolithMagoDocker(renamed, "service", " ")).toEqual(phpRoot);
+  });
+  it("normalizes Docker paths before validating and saving shared configuration", () => {
+    const magoDocker = {
+      service: " php ",
+      composeDirectory: " ./artifact//api/ ",
+      containerPath: " /app/api/ ",
+      binary: " ./tools/vendor/bin/mago ",
+    };
+    expect(normalizeMonolithMagoDocker(magoDocker)).toEqual({
+      service: "php",
+      composeDirectory: "artifact/api",
+      containerPath: "/app/api",
+      binary: "tools/vendor/bin/mago",
+    });
+    expect(validateMonolithAreas([{ ...phpRoot, magoDocker }])).toBeNull();
+    expect(
+      validateMonolithAreas([{ ...phpRoot, magoDocker: { service: "php;whoami" } }]),
+    ).not.toBeNull();
+    expect(
+      validateMonolithAreas([
+        { ...phpRoot, magoDocker: { service: "php", containerPath: "../app" } },
+      ]),
+    ).not.toBeNull();
+  });
+  it("keeps Docker overrides in dirty drafts and after external config refresh", () => {
+    const saved = {
+      ...config,
+      areas: [{ ...phpRoot, magoDocker: { service: "php", binary: "mago" } }],
+    };
+    const draft = createMonolithAreaDraft(saved);
+    const edited = {
+      ...draft,
+      areas: draft.areas.map((area) => editMonolithMagoDocker(area, "service", "php-dev")),
+    };
+    const conflicting = reconcileMonolithAreaDraft(edited, { ...saved, defaultBaseBranch: "main" });
+    expect(conflicting.areas[0]?.magoDocker?.service).toBe("php-dev");
+    expect(conflicting.conflictingConfig).not.toBeNull();
+  });
   it("validates PHP entry folders relative to the area and preserves them through draft refresh", () => {
     const area = { ...phpRoot, entrypointPaths: ["src/Controller", "src/Jobs"] };
     expect(validateMonolithAreas([area])).toBeNull();

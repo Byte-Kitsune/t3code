@@ -18,12 +18,55 @@ const MonolithAreaPath = TrimmedNonEmptyString.check(
   ),
 );
 
+export const MonolithMagoDocker = Schema.Struct({
+  service: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(100),
+    Schema.makeFilter((value: string) => /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(value), {
+      expected: "a Docker Compose service name",
+    }),
+  ),
+  composeDirectory: Schema.optional(MonolithAreaPath),
+  containerPath: Schema.optional(
+    TrimmedNonEmptyString.check(
+      Schema.isMaxLength(1024),
+      Schema.makeFilter(
+        (value: string) =>
+          value === "/" ||
+          (value.startsWith("/") &&
+            !value.includes("\\") &&
+            !value.includes("\0") &&
+            value
+              .slice(1)
+              .split("/")
+              .every((part) => part.length > 0 && part !== "." && part !== "..")),
+        { expected: "an absolute POSIX container directory without traversal" },
+      ),
+    ),
+  ),
+  binary: Schema.optional(
+    TrimmedNonEmptyString.check(
+      Schema.isMaxLength(1024),
+      Schema.makeFilter(
+        (value: string) =>
+          /^[a-zA-Z0-9_/.][a-zA-Z0-9_./-]*$/.test(value) &&
+          value
+            .replace(/^\//, "")
+            .split("/")
+            .every((part) => part.length > 0 && part !== "." && part !== ".."),
+        { expected: "a POSIX executable path without shell syntax or traversal" },
+      ),
+    ),
+  ),
+});
+export type MonolithMagoDocker = typeof MonolithMagoDocker.Type;
+
 export const MonolithArea = Schema.Struct({
   id: TrimmedNonEmptyString.check(Schema.isMaxLength(1100)),
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
   path: MonolithAreaPath,
   kind: Schema.Literals(["php", "react", "folder"]),
   enabled: Schema.optional(Schema.Boolean),
+  magoDocker: Schema.optional(MonolithMagoDocker),
   entrypointPaths: Schema.optional(Schema.Array(MonolithAreaPath).check(Schema.isMaxLength(100))),
 });
 export type MonolithArea = typeof MonolithArea.Type;

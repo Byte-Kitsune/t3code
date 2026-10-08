@@ -3,6 +3,7 @@ import * as MonolithAnalyzerService from "./project/MonolithAnalyzerService.ts";
 import * as AnalyzerDiscoveryService from "./project/AnalyzerDiscoveryService.ts";
 import * as AnalyzerExecution from "./analyzers/AnalyzerExecution.ts";
 import * as PhpInsightsExecution from "./analyzers/PhpInsightsExecution.ts";
+import * as MagoDockerExecution from "./analyzers/MagoDockerExecution.ts";
 import * as MonolithService from "./project/MonolithService.ts";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Clock from "effect/Clock";
@@ -413,9 +414,12 @@ const layerWorkspaceFileSystem = WorkspaceFileSystem.layer.pipe(
   Layer.provide(layerWorkspaceEntries),
 );
 
+const layerMagoDocker = MagoDockerExecution.layer.pipe(Layer.provide(ProcessRunner.layer));
+
 const layerWorkspace = Layer.mergeAll(
   MonolithService.layer,
   SymfonyReferenceService.layer.pipe(
+    Layer.provide(layerMagoDocker),
     Layer.provide(MonolithService.layer),
     Layer.provide(AnalyzerDiscoveryService.layer),
     Layer.provide(ProcessRunner.layer),
@@ -423,8 +427,18 @@ const layerWorkspace = Layer.mergeAll(
   MonolithAnalyzerService.layer.pipe(
     Layer.provide(MonolithService.layer),
     Layer.provide(AnalyzerDiscoveryService.layer),
-    Layer.provide(AnalyzerExecution.layer.pipe(Layer.provide(ProcessRunner.layer))),
-    Layer.provide(PhpInsightsExecution.layer.pipe(Layer.provide(ProcessRunner.layer))),
+    Layer.provide(
+      AnalyzerExecution.layer.pipe(
+        Layer.provide(layerMagoDocker),
+        Layer.provide(ProcessRunner.layer),
+      ),
+    ),
+    Layer.provide(
+      PhpInsightsExecution.layer.pipe(
+        Layer.provide(layerMagoDocker),
+        Layer.provide(ProcessRunner.layer),
+      ),
+    ),
   ),
   WorkspacePaths.layer,
   layerWorkspaceEntries,

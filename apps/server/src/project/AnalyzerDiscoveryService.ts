@@ -213,6 +213,13 @@ const make = Effect.gen(function* () {
           directory = path.dirname(directory);
         }
       }
+      // A configured container may own Composer's vendor directory in a named
+      // volume or install Mago globally; host file availability is not its probe.
+      if (area.kind === "php" && area.magoDocker && manifests.length === 0)
+        manifests.push({ directory: areaRoot, filename: "t3.monolith.json", manifest: {} });
+      const hasDeclaredMago = manifests.some(
+        (entry) => "carthage-software/mago" in dependencies(entry.manifest),
+      );
       const wiringManifests =
         area.kind === "php"
           ? manifests.filter(
@@ -223,8 +230,14 @@ const make = Effect.gen(function* () {
         const tool = area.kind === "php" ? "mago" : "biome";
         const deps = dependencies(manifest);
         const dependency = tool === "mago" ? "carthage-software/mago" : "@biomejs/biome";
-        if (!(dependency in deps)) continue;
-        const manifestPath = relative(path.join(directory, filename));
+        if (
+          !(dependency in deps) &&
+          !(tool === "mago" && area.magoDocker && !hasDeclaredMago && directory === areaRoot)
+        )
+          continue;
+        const manifestPath = relative(
+          path.join(filename === "t3.monolith.json" ? root : directory, filename),
+        );
         const scripts: Array<AnalyzerScript> = [];
         const scriptDirectories = new Map<AnalyzerScript, string>();
         const scriptManifests = manifests.filter(

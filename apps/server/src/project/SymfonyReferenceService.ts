@@ -7,8 +7,11 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as ProcessRunner from "../processRunner.ts";
+import * as MagoDockerExecution from "../analyzers/MagoDockerExecution.ts";
 import * as AnalyzerDiscoveryService from "./AnalyzerDiscoveryService.ts";
 import * as MonolithService from "./MonolithService.ts";
+
+const isDockerError = Schema.is(MagoDockerExecution.MagoDockerError);
 
 export class SymfonyReferenceError extends Schema.TaggedError<SymfonyReferenceError>()(
   "SymfonyReferenceError",
@@ -19,7 +22,8 @@ export class SymfonyReferenceError extends Schema.TaggedError<SymfonyReferenceEr
   },
 ) {
   override get message(): string {
-    return `Could not generate the Symfony container reference (${this.stage}).`;
+    const detail = isDockerError(this.cause) ? ` ${this.cause.message}` : "";
+    return `Could not generate the Symfony container reference (${this.stage}).${detail}`;
   }
 }
 
@@ -43,6 +47,7 @@ const make = Effect.gen(function* () {
   const monolith = yield* MonolithService.MonolithService;
   const discovery = yield* AnalyzerDiscoveryService.AnalyzerDiscoveryService;
   const generation = yield* Semaphore.make(1);
+  const transport = yield* Effect.serviceOption(MagoDockerExecution.MagoDockerExecution);
   const generate: SymfonyReferenceService["Service"]["generate"] = Effect.fn(
     "SymfonyReferenceService.generate",
   )(function* ({ cwd, areaId }) {
@@ -69,8 +74,10 @@ const make = Effect.gen(function* () {
       );
     const reference = discovered[0]?.tools.find(
       (tool) =>
-        tool.symfonyWiringReference?.generatorAvailable &&
-        tool.symfonyWiringReference.autoloadAvailable,
+        tool.symfonyWiringReference &&
+        (area.magoDocker ||
+          (tool.symfonyWiringReference.generatorAvailable &&
+            tool.symfonyWiringReference.autoloadAvailable)),
     )?.symfonyWiringReference;
     if (!reference) return yield* new SymfonyReferenceError({ areaId, stage: "prerequisites" });
     const safePath = Effect.fnUntraced(function* (relative: string, allowMissing = false) {
@@ -99,26 +106,55 @@ const make = Effect.gen(function* () {
       return target;
     });
     const appRoot = yield* safePath(area.path);
-    const consolePath = yield* safePath(paths.join(area.path, "bin/console"));
-    const generatorPath = yield* safePath(reference.generatorPath);
-    const autoloadPath = yield* safePath(reference.autoloadPath);
+    const consolePath = yield* safePath(paths.join(area.path, "bin/console"), !!area.magoDocker);
+    const generatorPath = yield* safePath(reference.generatorPath, !!area.magoDocker);
+    const autoloadPath = yield* safePath(reference.autoloadPath, !!area.magoDocker);
     const referencePath = yield* safePath(reference.referencePath, true);
+    if (area.magoDocker && Option.isNone(transport))
+      return yield* new SymfonyReferenceError({ areaId, stage: "prerequisites" });
+    const docker =
+      area.magoDocker && Option.isSome(transport)
+        ? yield* transport.value
+            .prepare({ workspaceRoot: root, areaPath: area.path, runtime: area.magoDocker })
+            .pipe(
+              Effect.mapError(
+                (cause) => new SymfonyReferenceError({ areaId, stage: "prerequisites", cause }),
+              ),
+            )
+        : undefined;
+    if (docker)
+      for (const target of [consolePath, generatorPath, autoloadPath]) {
+        if (
+          !(yield* docker
+            .exists(target)
+            .pipe(
+              Effect.mapError(
+                (cause) => new SymfonyReferenceError({ areaId, stage: "prerequisites", cause }),
+              ),
+            ))
+        )
+          return yield* new SymfonyReferenceError({ areaId, stage: "prerequisites" });
+      }
     const runJson = Effect.fnUntraced(function* (
       stage: "types" | "services" | "export",
       args: ReadonlyArray<string>,
     ) {
-      const output = yield* runner
-        .run({
-          command: "php",
-          args,
-          cwd: appRoot,
-          env: { ...process.env, APP_ENV: "dev", APP_DEBUG: "1" },
-          timeout: 60_000,
-          maxOutputBytes: 4_000_000,
-          outputMode: "error",
-          timeoutBehavior: "error",
-        })
-        .pipe(Effect.mapError((cause) => new SymfonyReferenceError({ areaId, stage, cause })));
+      const failure = (cause: unknown) => new SymfonyReferenceError({ areaId, stage, cause });
+      const processEffect = docker
+        ? docker.runPhp(args, { APP_ENV: "dev", APP_DEBUG: "1" }).pipe(Effect.mapError(failure))
+        : runner
+            .run({
+              command: "php",
+              args,
+              cwd: appRoot,
+              env: { ...process.env, APP_ENV: "dev", APP_DEBUG: "1" },
+              timeout: 60_000,
+              maxOutputBytes: 4_000_000,
+              outputMode: "error",
+              timeoutBehavior: "error",
+            })
+            .pipe(Effect.mapError(failure));
+      const output = yield* processEffect;
       if (
         output.code !== 0 ||
         output.timedOut ||
@@ -144,8 +180,15 @@ const make = Effect.gen(function* () {
           );
         const typesPath = paths.join(temporaryDirectory, "types.json");
         const servicesPath = paths.join(temporaryDirectory, "services.json");
+        const remote = docker
+          ? yield* docker.allocateTemp.pipe(
+              Effect.mapError(
+                (cause) => new SymfonyReferenceError({ areaId, stage: "write", cause }),
+              ),
+            )
+          : undefined;
         const base = [
-          consolePath,
+          docker ? docker.toContainer(consolePath) : consolePath,
           "debug:container",
           "--env=dev",
           "--format=json",
@@ -167,11 +210,27 @@ const make = Effect.gen(function* () {
               (cause) => new SymfonyReferenceError({ areaId, stage: "write", cause }),
             ),
           );
+        if (remote) {
+          yield* remote
+            .write("types.json", types)
+            .pipe(
+              Effect.mapError(
+                (cause) => new SymfonyReferenceError({ areaId, stage: "write", cause }),
+              ),
+            );
+          yield* remote
+            .write("services.json", services)
+            .pipe(
+              Effect.mapError(
+                (cause) => new SymfonyReferenceError({ areaId, stage: "write", cause }),
+              ),
+            );
+        }
         const exported = yield* runJson("export", [
-          generatorPath,
-          `--types=${typesPath}`,
-          `--services=${servicesPath}`,
-          `--autoload=${autoloadPath}`,
+          docker ? docker.toContainer(generatorPath) : generatorPath,
+          `--types=${remote ? `${remote.path}/types.json` : typesPath}`,
+          `--services=${remote ? `${remote.path}/services.json` : servicesPath}`,
+          `--autoload=${docker ? docker.toContainer(autoloadPath) : autoloadPath}`,
         ]);
         // Nothing touches the shared reference before all three processes and the
         // JSON validation succeed. Publish in the same directory for atomic rename.

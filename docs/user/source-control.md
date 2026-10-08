@@ -238,8 +238,9 @@ including applications nested under folders such as `artifact/` and `artifact-te
 Dependencies, build output, symbolic links, and PHP tools installations inside an application's
 `tools/` tree are excluded from discovery.
 
-Open the project's **Settings → Project → Monolith areas** to rename, add, remove, or exclude
-areas. A **Folder** area can group documentation, infrastructure, or any other directory without
+Open **Settings → Project**, choose your project, and scroll to **Monolith areas** to rename, add,
+remove, or exclude areas. You can also use the project's gear in the sidebar or search settings for
+**Monolith areas**. A **Folder** area can group documentation, infrastructure, or any other directory without
 PHP or React. **Rescan** offers new applications to add; it keeps your saved choices. When areas
 overlap, the deepest folder wins. An excluded deeper folder goes to **Other**, which appears after
 the configured groups. Use the diff file tree's area selector to review one group at a time.
@@ -274,6 +275,25 @@ source lines. PHP uses Mago format checks, analysis, and guard; React uses Biome
 changes are applied. Missing tools and failed checks are shown separately from passing checks.
 Install tools with your project's usual package manager before opening files. Existing analyzer
 configuration is used, including Mago installed in a PHP area's `tools/` Composer project.
+
+For PHP areas running in Docker Compose, enter the **Mago Compose service** in **Monolith areas**,
+for example `php` or `php-dev`. Mago checks and PHP insights then run in that existing service.
+Leave the service blank to use local execution. Start the service with your project's usual Compose
+workflow before opening files. Optional **Docker paths** can override the Compose folder relative
+to the repository root, the PHP area's absolute path in the container, and the Mago executable.
+Without overrides, T3 Code detects the nearest Compose project and bind mount, then looks for
+Mago in the area's Composer installation or on the container's executable path.
+
+Docker choices are shared per area through `t3.monolith.json`, for example:
+
+```json
+"magoDocker": {
+  "service": "php",
+  "composeDirectory": ".",
+  "containerPath": "/app/artifact/api",
+  "binary": "tools/vendor/bin/mago"
+}
+```
 
 The project settings show detected tools and configuration paths. If the Symfony Wiring exporter
 and application autoloader are installed, **Generate container reference** refreshes the dev-container

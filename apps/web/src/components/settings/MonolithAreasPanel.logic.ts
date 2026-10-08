@@ -1,4 +1,7 @@
-import type { MonolithArea, MonolithConfig } from "@t3tools/contracts";
+import { MonolithMagoDocker, type MonolithArea, type MonolithConfig } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
+
+const isMagoDocker = Schema.is(MonolithMagoDocker);
 
 export interface MonolithAreaDraft {
   readonly baseline: MonolithConfig;
@@ -49,6 +52,35 @@ export function normalizeMonolithAreaPath(path: string): string | null {
   return parts.filter((part) => part !== "" && part !== ".").join("/") || ".";
 }
 
+export function editMonolithMagoDocker(
+  area: MonolithArea,
+  field: keyof MonolithMagoDocker,
+  value: string,
+): MonolithArea {
+  if (field === "service" && !value.trim()) {
+    const { magoDocker: _previous, ...rest } = area;
+    return rest;
+  }
+  const previous = area.magoDocker ?? { service: "" };
+  if (field !== "service" && !value.trim()) {
+    const { [field]: _previous, ...rest } = previous;
+    return { ...area, magoDocker: rest };
+  }
+  return { ...area, magoDocker: { ...previous, [field]: value } };
+}
+
+export function normalizeMonolithMagoDocker(docker: MonolithMagoDocker): MonolithMagoDocker {
+  const { service, composeDirectory, containerPath, binary } = docker;
+  return {
+    service: service.trim(),
+    ...(composeDirectory
+      ? { composeDirectory: normalizeMonolithAreaPath(composeDirectory) ?? composeDirectory.trim() }
+      : {}),
+    ...(containerPath ? { containerPath: containerPath.trim().replace(/\/$/, "") || "/" } : {}),
+    ...(binary ? { binary: binary.trim().replace(/^(\.\/)+/, "") } : {}),
+  };
+}
+
 export function validateMonolithAreas(areas: readonly MonolithArea[]): string | null {
   const paths = new Set<string>();
   for (const area of areas) {
@@ -62,6 +94,8 @@ export function validateMonolithAreas(areas: readonly MonolithArea[]): string | 
       return "Entry folders must be relative to the PHP area, such as src/Controller.";
     if ((area.entrypointPaths?.length ?? 0) > 100)
       return "An area can contain up to 100 entry folders.";
+    if (area.magoDocker && !isMagoDocker(normalizeMonolithMagoDocker(area.magoDocker)))
+      return "Docker Mago needs a valid Compose service name, a project-relative Compose folder and an absolute container folder. The binary must be a single POSIX executable path.";
     paths.add(path);
   }
   return null;

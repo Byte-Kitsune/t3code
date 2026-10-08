@@ -540,9 +540,10 @@ function ProjectDetail({
         </SettingsSection>
         <ProjectDefaultsSettings category="project" />
         <ProjectActionsSettings />
-        {group.memberProjects.map((member) => (
+        {group.memberProjects.map((member, index) => (
           <Fragment key={member.physicalProjectKey}>
             <MonolithAreasPanel
+              {...(index === 0 ? { sectionId: "monolith-areas" } : {})}
               environmentId={member.environmentId}
               projectId={member.id}
               cwd={member.workspaceRoot}
@@ -551,6 +552,7 @@ function ProjectDetail({
                 : {})}
             />
             <MonolithAnalyzersPanel
+              {...(index === 0 ? { sectionId: "file-analyzers" } : {})}
               environmentId={member.environmentId}
               projectId={member.id}
               cwd={member.workspaceRoot}

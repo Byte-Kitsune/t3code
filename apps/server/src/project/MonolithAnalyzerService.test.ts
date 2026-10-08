@@ -312,3 +312,65 @@ it.effect("discards insights when the opened source changes during a successful 
     expect(result.runs.every((run) => run.status === "failed")).toBe(true);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it.effect("uses the configured Docker runtime despite missing host vendor and extensions", () =>
+  Effect.gen(function* () {
+    const root = yield* setup;
+    const fs = yield* FileSystem.FileSystem;
+    yield* fs.remove(`${root}/app/vendor`, { recursive: true });
+    yield* write(
+      root,
+      "app/tools/composer.json",
+      JSON.stringify({
+        require: {
+          "carthage-software/mago": "*",
+          "byte-kitsune/mago-doctrine-query-budget": "*",
+          "byte-kitsune/mago-architecture-graph": "*",
+          "byte-kitsune/mago-symfony-wiring": "*",
+        },
+      }),
+    );
+    const runtime = { service: "php", composeDirectory: ".", containerPath: "/workspace/app" };
+    yield* write(
+      root,
+      "t3.monolith.json",
+      JSON.stringify({
+        version: 1,
+        initialized: true,
+        areas: [{ id: "php:app", name: "API", kind: "php", path: "app", magoDocker: runtime }],
+      }),
+    );
+    const calls: AnalyzerExecution.AnalyzerExecutionInput[] = [];
+    const insightCalls: PhpInsightsExecution.PhpInsightsInput[] = [];
+    const result = yield* Effect.flatMap(
+      MonolithAnalyzerService.MonolithAnalyzerService,
+      (service) => service.checkFile({ cwd: root, path: "app/src/Test.php" }),
+    ).pipe(
+      Effect.provide(
+        serviceLayer(
+          (input) => {
+            calls.push(input);
+            return passed();
+          },
+          (input) => {
+            insightCalls.push(input);
+            return Effect.succeed({
+              queryBudget: { status: "complete", methods: [] },
+              entryChains: { status: "complete", targets: [] },
+            });
+          },
+        ),
+      ),
+    );
+    expect(calls).toHaveLength(3);
+    expect(calls.every((call) => call.runtime?.service === "php" && call.areaPath === "app")).toBe(
+      true,
+    );
+    expect(insightCalls).toHaveLength(1);
+    expect(insightCalls[0]).toMatchObject({ runtime, areaPath: "app" });
+    expect(insightCalls[0]!.autoloadPaths).toContain(`${root}/app/tools/vendor/autoload.php`);
+    expect(insightCalls[0]!.referencePath).toBe(`${root}/app/.mago/container-reference.dev.json`);
+    expect(result.runs.every((run) => run.status === "passed")).toBe(true);
+    expect(result.queryBudget?.status).toBe("complete");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);

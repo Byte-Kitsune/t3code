@@ -1,9 +1,14 @@
+import type { MonolithMagoDocker } from "@t3tools/contracts";
 import * as Path from "effect/Path";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Option from "effect/Option";
+import * as MagoDockerExecution from "./MagoDockerExecution.ts";
 import * as ProcessRunner from "../processRunner.ts";
+
+const isDockerError = Schema.is(MagoDockerExecution.MagoDockerError);
 
 export interface AnalyzerExecutionInput {
   readonly tool: "mago" | "biome";
@@ -14,6 +19,8 @@ export interface AnalyzerExecutionInput {
   readonly filePath: string;
   readonly configPath?: string;
   readonly sourceText?: string;
+  readonly runtime?: MonolithMagoDocker;
+  readonly areaPath?: string;
 }
 
 export interface AnalyzerDiagnostic {
@@ -45,6 +52,7 @@ export class AnalyzerExecutionError extends Schema.TaggedError<AnalyzerExecution
   },
 ) {
   override get message(): string {
+    if (isDockerError(this.cause)) return this.cause.message;
     return `The ${this.tool} ${this.operation} check could not complete (${this.category}).`;
   }
 }
@@ -99,8 +107,18 @@ function relativeFile(
   input: AnalyzerExecutionInput,
   reportedPath: string,
   paths: Path.Path,
+  reportPathToHost?: (path: string) => string,
 ): string | null {
-  const absolute = paths.resolve(input.cwd, reportedPath);
+  let mapped = reportedPath;
+  if (reportPathToHost && reportedPath.startsWith("/")) {
+    try {
+      mapped = reportPathToHost(reportedPath);
+    } catch {
+      // Reports can include dependency files outside the area's container mount.
+      return null;
+    }
+  }
+  const absolute = paths.resolve(input.cwd, mapped);
   const relative = paths.relative(input.workspaceRoot, absolute);
   if (relative === ".." || relative.startsWith(`..${paths.sep}`) || paths.isAbsolute(relative))
     return null;
@@ -129,6 +147,7 @@ function normalizeMago(
   input: AnalyzerExecutionInput,
   stdout: string,
   paths: Path.Path,
+  reportPathToHost?: (path: string) => string,
 ): AnalyzerDiagnostic[] {
   const report = record(JSON.parse(stdout));
   if (!Array.isArray(report.issues)) throw new Error("Mago report has no issues array");
@@ -152,7 +171,7 @@ function normalizeMago(
       annotations.find((item) => String(item.kind).toLowerCase() === "primary") ?? annotations[0]!;
     const span = record(annotation.span);
     const file = record(span.file_id);
-    const diagnosticPath = relativeFile(input, text(file.path), paths);
+    const diagnosticPath = relativeFile(input, text(file.path), paths, reportPathToHost);
     if (diagnosticPath === null) continue;
     const start = record(span.start);
     const end = span.end === undefined ? undefined : record(span.end);
@@ -268,12 +287,14 @@ function normalizeFormat(
 const make = Effect.gen(function* () {
   const runner = yield* ProcessRunner.ProcessRunner;
   const paths = yield* Path.Path;
+  const dockerService = yield* Effect.serviceOption(MagoDockerExecution.MagoDockerExecution);
   const run = Effect.fn("AnalyzerExecution.run")(function* (input: AnalyzerExecutionInput) {
     const validPair =
       input.tool === "biome" ? input.operation === "check" : input.operation !== "check";
     if (
       !validPair ||
-      !paths.isAbsolute(input.command) ||
+      (!input.runtime && !paths.isAbsolute(input.command)) ||
+      (input.runtime !== undefined && (input.tool !== "mago" || input.areaPath === undefined)) ||
       !paths.isAbsolute(input.cwd) ||
       !paths.isAbsolute(input.workspaceRoot) ||
       !paths.isAbsolute(input.filePath) ||
@@ -285,56 +306,81 @@ const make = Effect.gen(function* () {
         cause: new Error("Invalid analyzer invocation"),
       });
     }
-    const args =
-      input.tool === "biome"
-        ? [
-            "check",
-            "--reporter=json",
-            "--colors=off",
-            "--max-diagnostics=none",
-            ...(input.configPath ? [`--config-path=${input.configPath}`] : []),
-            input.filePath,
-          ]
-        : [
-            ...(input.configPath ? ["--config", input.configPath] : []),
-            input.operation,
-            ...(input.operation === "format"
-              ? ["--dry-run", input.filePath]
-              : [
-                  "--reporting-format",
-                  "json",
-                  "--reporting-target",
-                  "stdout",
-                  "--minimum-report-level",
-                  "note",
-                ]),
-          ];
-    const result = yield* runner
-      .run({
-        command: input.command,
-        args,
-        cwd: input.cwd,
-        env: { ...process.env, NO_COLOR: "1" },
-        timeout: 60_000,
-        maxOutputBytes: 4_000_000,
-        outputMode: "error",
-        timeoutBehavior: "error",
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) =>
-            new AnalyzerExecutionError({
+    const docker = input.runtime
+      ? yield* Effect.gen(function* () {
+          if (Option.isNone(dockerService))
+            return yield* new AnalyzerExecutionError({
               ...input,
-              category:
-                cause._tag === "ProcessTimeoutError"
-                  ? "timeout"
-                  : cause._tag === "ProcessOutputLimitError"
-                    ? "output"
-                    : "spawn",
-              cause,
-            }),
-        ),
-      );
+              category: "input",
+              cause: new Error("Docker runtime is unavailable."),
+            });
+          return yield* dockerService.value
+            .prepare({
+              workspaceRoot: input.workspaceRoot,
+              areaPath: input.areaPath!,
+              runtime: input.runtime!,
+              binaryPath: input.command,
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) => new AnalyzerExecutionError({ ...input, category: "spawn", cause }),
+              ),
+            );
+        })
+      : undefined;
+    const toolPath = (hostPath: string) => docker?.toContainer(hostPath) ?? hostPath;
+    const args = yield* Effect.try({
+      try: () =>
+        input.tool === "biome"
+          ? [
+              "check",
+              "--reporter=json",
+              "--colors=off",
+              "--max-diagnostics=none",
+              ...(input.configPath ? [`--config-path=${input.configPath}`] : []),
+              input.filePath,
+            ]
+          : [
+              ...(input.configPath ? ["--config", toolPath(input.configPath)] : []),
+              input.operation,
+              ...(input.operation === "format"
+                ? ["--dry-run", toolPath(input.filePath)]
+                : [
+                    "--reporting-format",
+                    "json",
+                    "--reporting-target",
+                    "stdout",
+                    "--minimum-report-level",
+                    "note",
+                  ]),
+            ],
+      catch: (cause) => new AnalyzerExecutionError({ ...input, category: "input", cause }),
+    });
+    const processError = (cause: { readonly _tag: string }) =>
+      new AnalyzerExecutionError({
+        ...input,
+        category:
+          cause._tag === "ProcessTimeoutError"
+            ? "timeout"
+            : cause._tag === "ProcessOutputLimitError"
+              ? "output"
+              : "spawn",
+        cause,
+      });
+    const result = yield* docker
+      ? docker.runMago(args, { NO_COLOR: "1" }).pipe(Effect.mapError(processError))
+      : runner
+          .run({
+            command: input.command,
+            args,
+            cwd: input.cwd,
+            env: { ...process.env, NO_COLOR: "1" },
+            timeout: 60_000,
+            maxOutputBytes: 4_000_000,
+            outputMode: "error",
+            timeoutBehavior: "error",
+          })
+          .pipe(Effect.mapError(processError));
     if (result.code === null || result.code > 1 || result.timedOut) {
       return yield* new AnalyzerExecutionError({
         ...input,
@@ -360,7 +406,7 @@ const make = Effect.gen(function* () {
           ? normalizeBiome(input, result.stdout, paths)
           : input.operation === "format"
             ? normalizeFormat(input, result.stdout, paths)
-            : normalizeMago(input, result.stdout, paths),
+            : normalizeMago(input, result.stdout, paths, docker?.toHost),
       catch: (cause) => new AnalyzerExecutionError({ ...input, category: "report", cause }),
     });
     if (input.operation === "format" && result.code !== 0 && diagnostics.length === 0) {
