@@ -1,5 +1,5 @@
 import type { MonolithCheckFileResult, MonolithDoctrineQueryThresholds } from "@t3tools/contracts";
-import { phpInsightSourceTarget } from "./phpFileInsights";
+import { phpInsightSourceTarget } from "./phpInsightTargets";
 
 export type PhpQueryMethod = NonNullable<MonolithCheckFileResult["queryBudget"]>["methods"][number];
 export type PhpQueryThresholdSource = NonNullable<

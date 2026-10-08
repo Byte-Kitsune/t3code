@@ -1,6 +1,6 @@
 import type { MonolithAnalyzerDiagnostic, MonolithCheckFileResult } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import { fileCheckSummary } from "./fileAnalyzerStatus";
+import { fileCheckSummary } from "./fileAnalyzerStatusHelpers";
 
 const result: MonolithCheckFileResult = {
   areaId: "api",

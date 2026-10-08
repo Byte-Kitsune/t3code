@@ -1,6 +1,6 @@
 import { cn } from "~/lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
-import { queryBudgetLabel } from "./phpFileInsights";
+import { queryBudgetLabel } from "./phpInsightTargets";
 import type { PhpQueryAnnotation as QueryAnnotation } from "./phpQueryAnnotations";
 
 export function PhpQueryAnnotation({ methods }: { readonly methods: readonly QueryAnnotation[] }) {

@@ -1,6 +1,6 @@
 import type { MonolithCheckFileResult } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import { phpInsightSourceTarget, queryBudgetLabel } from "./phpFileInsights";
+import { phpInsightSourceTarget, queryBudgetLabel } from "./phpInsightTargets";
 
 type Method = NonNullable<MonolithCheckFileResult["queryBudget"]>["methods"][number];
 const method = (lowerBound: number, upperBound: number | null): Method => ({

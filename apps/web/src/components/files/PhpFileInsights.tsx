@@ -1,7 +1,11 @@
 import type { MonolithCheckFileResult } from "@t3tools/contracts";
 import { Button } from "~/components/ui/button";
 import type { useMonolithFileCheck } from "~/hooks/useMonolithFileCheck";
-import { phpInsightSourceTarget, phpInsightStatusLabel, queryBudgetLabel } from "./phpFileInsights";
+import {
+  phpInsightSourceTarget,
+  phpInsightStatusLabel,
+  queryBudgetLabel,
+} from "./phpInsightTargets";
 
 type Source = {
   symbol: string;

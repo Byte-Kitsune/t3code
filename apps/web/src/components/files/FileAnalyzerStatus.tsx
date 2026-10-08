@@ -1,6 +1,6 @@
 import type { useMonolithFileCheck } from "~/hooks/useMonolithFileCheck";
-import { fileCheckSummary } from "./fileAnalyzerStatus";
-import { phpInsightStatusLabel } from "./phpFileInsights";
+import { fileCheckSummary } from "./fileAnalyzerStatusHelpers";
+import { phpInsightStatusLabel } from "./phpInsightTargets";
 
 export function FileAnalyzerStatus({
   check,

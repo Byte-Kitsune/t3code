@@ -9,7 +9,7 @@ import {
   DialogPopup,
   DialogTitle,
 } from "~/components/ui/dialog";
-import { phpInsightSourceTarget } from "./phpFileInsights";
+import { phpInsightSourceTarget } from "./phpInsightTargets";
 
 type EntryTarget = NonNullable<MonolithCheckFileResult["entryChains"]>["targets"][number];
 type Location = EntryTarget["directCallers"][number];
