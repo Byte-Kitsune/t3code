@@ -59,7 +59,13 @@ describe("inline Doctrine query estimates", () => {
     const annotations = buildPhpQueryAnnotations({
       path: "src/Queries.php",
       lineCount: 20,
-      methods: [method(0, 0), unknown, method(0, 3), method(1, 1)],
+      methods: [
+        method(0, 0),
+        { ...method(0, 0), unknown: ["dynamic caller"], cycles: ["recursive caller"] },
+        unknown,
+        method(0, 3),
+        method(1, 1),
+      ],
     });
     expect(annotations.map(({ method }) => method.upperBound)).toEqual([null, 3, 1]);
     expect(annotations[0]?.severity).toBe("warning");

@@ -1121,9 +1121,14 @@ export default function FilePreviewPanel({
       !selectedFilePending &&
       file.data?.truncated === false,
   });
+  const sourceContents = file.data?.contents ?? null;
+  const queryMethods = fileCheck.result?.queryBudget?.methods;
+  const thresholdSource = fileCheck.result?.doctrineQueryThresholdsSource;
   const sourceGraph = fileCheck.result?.entryChains;
+  const annotationSites = sourceGraph?.annotationSites;
   const graphReady =
-    fileCheck.status === "checked" &&
+    // The check hook retains results only for these exact source bytes. A
+    // dependency refresh must not remove still-valid comments while checking.
     sourceGraph !== undefined &&
     (sourceGraph.status === "complete" || sourceGraph.status === "incomplete") &&
     relativePath !== null &&
@@ -1135,29 +1140,23 @@ export default function FilePreviewPanel({
   const queryThresholds = fileCheck.result?.doctrineQueryThresholds;
   const queryAnnotations = useMemo(
     () =>
-      fileCheck.result && file.data && relativePath && !isHostFile
+      queryMethods && sourceContents !== null && relativePath && !isHostFile
         ? buildPhpQueryAnnotations({
             path: relativePath,
-            methods: fileCheck.result?.queryBudget?.methods ?? [],
-            lineCount: file.data.contents.split(/\r\n|\r|\n/).length,
+            methods: queryMethods,
+            lineCount: sourceContents.split(/\r\n|\r|\n/).length,
             ...(queryThresholds ? { thresholds: queryThresholds } : {}),
-            ...(fileCheck.result?.doctrineQueryThresholdsSource
-              ? { thresholdSource: fileCheck.result.doctrineQueryThresholdsSource }
-              : {}),
+            ...(thresholdSource ? { thresholdSource } : {}),
           })
         : [],
-    [fileCheck.status, fileCheck.result, file.data, relativePath, isHostFile, queryThresholds],
+    [queryMethods, sourceContents, relativePath, isHostFile, queryThresholds, thresholdSource],
   );
   const commentAnnotations = useMemo(
     () =>
-      graphReady && file.data && relativePath
-        ? buildPhpCommentAnnotations(
-            relativePath,
-            file.data.contents,
-            sourceGraph?.annotationSites ?? [],
-          )
+      graphReady && sourceContents !== null && relativePath
+        ? buildPhpCommentAnnotations(relativePath, sourceContents, annotationSites ?? [])
         : [],
-    [graphReady, file.data, relativePath, sourceGraph],
+    [graphReady, sourceContents, relativePath, annotationSites],
   );
   const graphFileKey = JSON.stringify([environmentId, cwd, relativePath]);
   const [graphSelection, setGraphSelection] = useState<{
@@ -1180,16 +1179,16 @@ export default function FilePreviewPanel({
   );
   const onSourceTokenClick = useCallback(
     (token: TokenEventBase, event: MouseEvent) => {
-      if (!graphReady || !sourceGraph || !file.data) return;
+      if (!graphReady || !sourceGraph || sourceContents === null) return;
       openPhpSourceCallGraph({
         token,
         event,
-        contents: file.data.contents,
+        contents: sourceContents,
         targets: sourceGraph.targets,
         onOpen: openSourceGraph,
       });
     },
-    [file.data, graphReady, sourceGraph, openSourceGraph],
+    [sourceContents, graphReady, sourceGraph, openSourceGraph],
   );
   const attemptedPath = file.readError?.resolvedPath ?? file.readError?.operationPath;
   // A chat link cannot tell a folder from a file, so a folder arrives here as

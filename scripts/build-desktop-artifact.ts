@@ -33,6 +33,7 @@ import {
   findInlinedExternalPackages,
   selectCliRuntimeExternalDependencies,
 } from "./lib/cli-external-packages.ts";
+import { findUnexpectedCliPackageImports } from "./lib/cli-executable-imports.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
 import { selectDesktopRuntimeExternalDependencies } from "./lib/desktop-external-packages.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
@@ -586,6 +587,15 @@ export class ExternalizedBundleError extends Schema.TaggedError<ExternalizedBund
 ) {
   override get message(): string {
     return `The server bundle did not inline "${this.sentinel}" (${this.inlinedPackageCount} packages inlined). The bundle is meant to be self-contained apart from the runtime externals; if its dependencies are external again they will be absent from the sidecar, and the backend will fail with ERR_MODULE_NOT_FOUND. Check the deps.alwaysBundle wiring in apps/server/vite.config.ts.`;
+  }
+}
+
+export class UnexpectedBundleImportsError extends Schema.TaggedError<UnexpectedBundleImportsError>()(
+  "UnexpectedBundleImportsError",
+  { chunk: Schema.String, packages: Schema.Array(Schema.String) },
+) {
+  override get message(): string {
+    return `The server bundle ${this.chunk} imports packages absent from the packaged runtime: ${this.packages.join(", ")}. Run vp install, then rebuild without --skip-build. These dependencies must be bundled; publishing this package would cause ERR_MODULE_NOT_FOUND before the app window opens.`;
   }
 }
 
@@ -3528,6 +3538,10 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     const inlinedPackages = new Set<string>();
     for (const chunkName of chunkNames) {
       const source = yield* fs.readFileString(path.join(distDirs.serverDist, chunkName));
+      const unexpected = findUnexpectedCliPackageImports(source);
+      if (unexpected.length > 0) {
+        return yield* new UnexpectedBundleImportsError({ chunk: chunkName, packages: unexpected });
+      }
       const scan = findInlinedExternalPackages(source);
       totalRegions += scan.regionCount;
       for (const name of scan.inlined) inlined.add(name);

@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeModule from "node:module";
 import ts from "typescript-legacy";
+import { isExternalCliDependency } from "./cli-external-packages.ts";
 
 /**
  * Scan an emitted bundle chunk for ESM imports of packages that are not Node
@@ -46,4 +47,11 @@ export function findEsmImportsOfExternalPackages(source: string): ReadonlyArray<
   };
   visit(module);
   return [...specifiers].sort();
+}
+
+/** Packages left external accidentally will be absent from the desktop runtime. */
+export function findUnexpectedCliPackageImports(source: string): ReadonlyArray<string> {
+  return findEsmImportsOfExternalPackages(source).filter(
+    (specifier) => !isExternalCliDependency(specifier),
+  );
 }

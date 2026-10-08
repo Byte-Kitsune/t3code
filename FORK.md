@@ -147,7 +147,17 @@ the fork-specific macOS preview workflow was removed, and
 to `pingdotgg/t3code`. Normal CI remains enabled. Keep this guard when importing
 upstream workflow changes; do not restore automatic fork release publishing.
 
-Desktop artifacts are built locally. For Apple Silicon:
+The Linux test starter [`scripts/start-linux-test.sh`](scripts/start-linux-test.sh)
+installs locked dependencies and builds the current local checkout before every
+launch, including uncommitted changes. It never falls back to an old artifact;
+`T3CODE_BUILD_ONLY=1` builds without launching.
+
+Desktop artifacts are built locally. After pulling changes, run `vp install` before
+rebuilding: the bundler can otherwise leave a missing dependency (such as
+`smol-toml`) as an unresolved external import. The desktop packaging scan rejects
+package imports outside the staged runtime-external set in every server chunk,
+including lazy CLI chunks; a successful `--version` probe alone does not cover
+those imports. For Apple Silicon:
 
 ```sh
 vp install

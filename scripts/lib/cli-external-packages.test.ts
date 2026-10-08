@@ -9,7 +9,10 @@ import * as Schema from "effect/Schema";
 
 import serverPackageJson from "../../apps/server/package.json" with { type: "json" };
 
-import { findEsmImportsOfExternalPackages } from "./cli-executable-imports.ts";
+import {
+  findEsmImportsOfExternalPackages,
+  findUnexpectedCliPackageImports,
+} from "./cli-executable-imports.ts";
 
 import {
   isRuntimeExternalCliDependency,
@@ -335,5 +338,41 @@ describe("findEsmImportsOfExternalPackages", () => {
   it("does not mistake createRequire calls for imports", () => {
     const source = 'const { FileFinder } = createRequire(import.meta.url)("@ff-labs/fff-node");';
     assert.deepStrictEqual(findEsmImportsOfExternalPackages(source), []);
+  });
+});
+
+describe("desktop bundle import boundary", () => {
+  it("rejects missing ordinary packages even when another dependency was bundled", () => {
+    const source = `
+      //#region node_modules/effect/dist/Effect.js
+      export const inlinedEffect = true;
+      import { parse } from 'smol-toml';
+      export { stringify } from 'unshipped/parser';
+      const lazy = () => import('other-missing-package');
+    `;
+    assert.deepStrictEqual(findUnexpectedCliPackageImports(source), [
+      "other-missing-package",
+      "smol-toml",
+      "unshipped/parser",
+    ]);
+  });
+  it("allows runtime externals, builtins and adjacent bundle chunks", () => {
+    const source = `
+      import fs from 'node:fs';
+      import os from 'os';
+      import pty from 'node-pty';
+      import SDK from '@cursor/sdk';
+      import { value } from './binCli.mjs';
+      const lazy = () => import('bun:ffi');
+    `;
+    assert.deepStrictEqual(findUnexpectedCliPackageImports(source), []);
+  });
+  it("does not confuse commented imports or string values with runtime imports", () => {
+    assert.deepStrictEqual(
+      findUnexpectedCliPackageImports(
+        `// import toml from 'smol-toml';\nconst text = "import('missing')";`,
+      ),
+      [],
+    );
   });
 });
