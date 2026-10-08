@@ -214,7 +214,7 @@ const make = Effect.gen(function* () {
         if (
           indexPaths === undefined ||
           area === null ||
-          area.kind !== "php" ||
+          area.kind === "folder" ||
           indexSnapshot.key.length === 0 ||
           indexSnapshot.key.length > 256 ||
           indexSnapshot.paths.length === 0 ||

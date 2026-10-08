@@ -314,6 +314,33 @@ it.effect(
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+it.effect("reports the analyzer failure reason in background indexing status", () =>
+  Effect.gen(function* () {
+    const root = yield* setup;
+    yield* Effect.gen(function* () {
+      const service = yield* indexUse;
+      yield* service.index({ cwd: root });
+      yield* service.awaitIdle({ cwd: root });
+      const status = (yield* service.status({ cwd: root })).areas[0];
+      expect(status?.status).toBe("failed");
+      expect(status?.message).toContain("inside the workspace");
+    }).pipe(
+      Effect.provide(
+        serviceLayer(
+          () => [php],
+          () =>
+            Effect.fail(
+              new MonolithAnalyzerService.MonolithAnalyzerError({
+                operation: "check",
+                reason: "unsafe_path",
+              }),
+            ),
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 it.effect("rejects cache outputs above 64 MiB before disk publication or memory reuse", () =>
   Effect.gen(function* () {
     const root = yield* setup;

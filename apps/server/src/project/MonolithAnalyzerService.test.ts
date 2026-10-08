@@ -55,7 +55,7 @@ function serviceLayer(
 const passed = () => Effect.succeed({ diagnostics: [], exitCode: 0, status: "passed" as const });
 
 it.effect(
-  "indexes all installed React analyzers and keeps run counts isolated per tool and file",
+  "indexes all installed React analyzers from a shared snapshot and keeps per-file run counts",
   () =>
     Effect.gen(function* () {
       const root = yield* setup;
@@ -97,6 +97,10 @@ it.effect(
             cwd: root,
             areaId: "ui",
             paths: ["ui/package.json", "ui/app/A.js", "ui/app/B.js"],
+            snapshot: {
+              key: "react-index",
+              paths: ["ui/package.json", "ui/app/A.js", "ui/app/B.js"],
+            },
           }),
       ).pipe(
         Effect.provide(
@@ -988,6 +992,39 @@ it.effect("reuses full-snapshot Mago analyze and guard reports across indexing b
         }),
       ),
     );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("rejects a React snapshot containing a file from another area before running tools", () =>
+  Effect.gen(function* () {
+    const root = yield* setup;
+    yield* write(
+      root,
+      ".t3/monolith.json",
+      JSON.stringify({
+        version: 1,
+        initialized: true,
+        areas: [
+          { id: "ui", name: "UI", path: "ui", kind: "react" },
+          { id: "backend", name: "Backend", path: "app", kind: "php" },
+        ],
+      }),
+    );
+    yield* write(root, "ui/app/A.js", "export const a = 1;\n");
+    const output = yield* Effect.flatMap(
+      MonolithAnalyzerService.MonolithAnalyzerService,
+      (service) =>
+        service
+          .indexArea({
+            cwd: root,
+            areaId: "ui",
+            paths: ["ui/app/A.js"],
+            snapshot: { key: "unsafe-react", paths: ["ui/app/A.js", "app/src/Test.php"] },
+          })
+          .pipe(Effect.result),
+    ).pipe(Effect.provide(serviceLayer(() => Effect.die("Must not execute cross-area snapshots"))));
+    expect(output._tag).toBe("Failure");
+    if (output._tag === "Failure") expect(output.failure.reason).toBe("unsafe_path");
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 

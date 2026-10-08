@@ -23,6 +23,8 @@ import { matchMonolithArea } from "@t3tools/shared/monolithAreas";
 import * as MonolithAnalyzerService from "./MonolithAnalyzerService.ts";
 import * as MonolithService from "./MonolithService.ts";
 
+const isAnalyzerError = Schema.is(MonolithAnalyzerService.MonolithAnalyzerError);
+
 const MiB = 1024 * 1024;
 const MAX_SCAN_ENTRIES = 100000;
 const MAX_SOURCE_FILES = 50000;
@@ -73,7 +75,9 @@ export class MonolithIndexError extends Schema.TaggedError<MonolithIndexError>()
           return "The analysis results exceed the 64 MiB area-cache limit. Reduce the indexed area or exclude generated folders.";
       }
     }
-    return `Monolith indexing could not complete (${this.reason}).`;
+    const detail =
+      this.reason === "analysis" && isAnalyzerError(this.cause) ? ` ${this.cause.message}` : "";
+    return `Monolith indexing could not complete (${this.reason}).${detail}`;
   }
 }
 

@@ -54,7 +54,9 @@ reference generation is available from project settings. Failures report the fai
 step, process exit code or runtime limit, and a bounded stderr excerpt. Container
 JSON is never included in error details. Reference generation accepts up to 64 MiB
 per command locally and in Docker, matching the exporter's debug-view input limit;
-ordinary file-check command limits remain unchanged.
+ordinary file-check command limits remain unchanged. Shared indexing snapshots
+accept PHP and React areas while rejecting files from other areas; background
+indexing failures retain the analyzer's error reason in their status message.
 
 React areas support Biome, ESLint, and dependency-cruiser, including installed
 workspace binaries. Discovery extracts supported analyzer commands from package
