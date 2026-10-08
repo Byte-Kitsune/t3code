@@ -9,6 +9,15 @@ In the file-browser sidebar, choose an active area to browse and search its fold
 repository** to return to the full tree. Recently selected areas appear first; the selection is
 remembered locally for each project and environment.
 
+Choose **Changed Files** to see pending Git changes across all areas: uncommitted
+changes, staged and untracked files, and local commits that have not been pushed.
+Red takes priority for anything not committed yet. Committed new files awaiting a
+push are green; committed modifications awaiting a push are blue. These colors
+also appear in the ordinary area and repository trees. Deleted files are counted
+separately because they cannot be opened as current files. Git uses locally known
+remote refs; the filter does not fetch from the network. A branch without a usable
+remote or base reference treats its committed files as unpublished.
+
 ## File checks
 
 PHP areas use Mago. React areas can use Biome, ESLint and dependency-cruiser together. Install the

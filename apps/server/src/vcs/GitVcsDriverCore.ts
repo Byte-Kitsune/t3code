@@ -231,26 +231,32 @@ function parseReviewNumstat(stdout: string): ReviewDiffFileStat[] {
   return files;
 }
 
-function parsePorcelainPath(line: string): string | null {
-  if (line.startsWith("? ") || line.startsWith("! ")) {
-    const simple = line.slice(2).trim();
-    return simple.length > 0 ? simple : null;
+function parsePorcelainPath(record: string): string | null {
+  if (record.startsWith("? ")) return record.slice(2);
+  const fields = record.startsWith("1 ")
+    ? 8
+    : record.startsWith("2 ")
+      ? 9
+      : record.startsWith("u ")
+        ? 10
+        : 0;
+  if (!fields) return null;
+  let offset = 0;
+  for (let index = 0; index < fields; index++) {
+    const space = record.indexOf(" ", offset);
+    if (space < 0) return null;
+    offset = space + 1;
   }
+  return record.slice(offset) || null;
+}
 
-  if (!(line.startsWith("1 ") || line.startsWith("2 ") || line.startsWith("u "))) {
-    return null;
-  }
-
-  const tabIndex = line.indexOf("\t");
-  if (tabIndex >= 0) {
-    const fromTab = line.slice(tabIndex + 1);
-    const [filePath] = fromTab.split("\t");
-    return filePath?.trim().length ? filePath.trim() : null;
-  }
-
-  const parts = line.trim().split(/\s+/g);
-  const filePath = parts.at(-1) ?? "";
-  return filePath.length > 0 ? filePath : null;
+function isRepositoryFilePath(value: string): boolean {
+  return (
+    value.length > 0 &&
+    !value.startsWith("/") &&
+    !value.split("/").some((part) => part === ".." || part === ".") &&
+    !value.includes("\0")
+  );
 }
 
 function filterBranchesForListQuery(
@@ -1835,6 +1841,133 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     };
   });
 
+  const readFileChanges = Effect.fn("readFileChanges")(function* (
+    cwd: string,
+    branch: string | null,
+    upstreamRef: string | null,
+    working: ReadonlyMap<
+      string,
+      NonNullable<GitVcsDriver.GitStatusDetails["fileChanges"]>["files"][number]
+    >,
+  ) {
+    let baseRef: string | null = null;
+    if (branch) {
+      // An upstream may track the integration branch rather than our published branch.
+      const remote = yield* resolvePushRemoteName(cwd, branch);
+      const publishBranch = remote ? yield* resolvePublishBranchName(cwd, branch) : branch;
+      if (
+        remote &&
+        (yield* remoteBranchExists({ cwd, remoteName: remote, refName: publishBranch }))
+      ) {
+        baseRef = `${remote}/${publishBranch}`;
+      } else {
+        baseRef = upstreamRef ?? (yield* resolveBaseBranchForNoUpstream(cwd, branch));
+      }
+    } else {
+      const containing = yield* executeGit(
+        "GitVcsDriver.fileChanges.publishedDetached",
+        cwd,
+        ["for-each-ref", "--contains=HEAD", "--format=%(refname:short)", "refs/remotes"],
+        { allowNonZeroExit: true },
+      );
+      baseRef =
+        containing.exitCode === 0
+          ? (containing.stdout.split("\n").find((ref) => ref.length > 0) ?? null)
+          : null;
+      baseRef ??= yield* resolveBaseBranchForNoUpstream(cwd, "HEAD");
+    }
+    const committed = new Map<
+      string,
+      NonNullable<GitVcsDriver.GitStatusDetails["fileChanges"]>["files"][number]
+    >();
+    const head = yield* executeGit(
+      "GitVcsDriver.fileChanges.head",
+      cwd,
+      ["rev-parse", "--verify", "HEAD"],
+      { allowNonZeroExit: true },
+    );
+    if (head.exitCode === 0) {
+      const merge = baseRef
+        ? yield* executeGit(
+            "GitVcsDriver.fileChanges.mergeBase",
+            cwd,
+            ["merge-base", "HEAD", baseRef],
+            { allowNonZeroExit: true },
+          )
+        : null;
+      const mergeBase = merge?.exitCode === 0 ? merge.stdout.trim() : null;
+      if (mergeBase === head.stdout.trim()) {
+        // A behind-only branch has no unpublished changes.
+      } else if (mergeBase) {
+        const delta = yield* executeGit(
+          "GitVcsDriver.fileChanges.diff",
+          cwd,
+          [
+            "diff",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            mergeBase,
+            "HEAD",
+            "--",
+          ],
+          { maxOutputBytes: REVIEW_METADATA_MAX_OUTPUT_BYTES },
+        );
+        if (delta.stdoutTruncated)
+          return yield* new GitCommandError({
+            operation: "GitVcsDriver.fileChanges.diff",
+            command: "git",
+            cwd,
+            detail: "Git file changes exceeded the metadata limit.",
+          });
+        const entries = delta.stdout.split("\0");
+        for (let i = 0; i < entries.length - 1; i++) {
+          const code = entries[i++]!;
+          let filePath = entries[i]!;
+          if (code.startsWith("R") || code.startsWith("C")) filePath = entries[++i]!;
+          if (!filePath || !isRepositoryFilePath(filePath)) continue;
+          const kind =
+            code.startsWith("A") || code.startsWith("C")
+              ? "added"
+              : code.startsWith("D")
+                ? "deleted"
+                : code.startsWith("R")
+                  ? "renamed"
+                  : "modified";
+          committed.set(filePath, { path: filePath, kind, uncommitted: false });
+        }
+      } else if (branch !== null) {
+        // Without a usable published/base ref, the repository's entire committed tree is unpublished.
+        const tree = yield* executeGit(
+          "GitVcsDriver.fileChanges.tree",
+          cwd,
+          ["ls-tree", "-r", "--name-only", "-z", "HEAD"],
+          { maxOutputBytes: REVIEW_METADATA_MAX_OUTPUT_BYTES },
+        );
+        if (tree.stdoutTruncated)
+          return yield* new GitCommandError({
+            operation: "GitVcsDriver.fileChanges.tree",
+            command: "git",
+            cwd,
+            detail: "Git file changes exceeded the metadata limit.",
+          });
+        for (const filePath of tree.stdout.split("\0"))
+          if (isRepositoryFilePath(filePath))
+            committed.set(filePath, { path: filePath, kind: "added", uncommitted: false });
+      }
+    }
+    for (const [filePath, file] of working) {
+      const previous = committed.get(filePath);
+      committed.set(filePath, {
+        ...file,
+        kind: previous?.kind === "added" && file.kind !== "deleted" ? "added" : file.kind,
+      });
+    }
+    return { baseRef, files: [...committed.values()].sort((a, b) => a.path.localeCompare(b.path)) };
+  });
+
   const readStatusDetailsLocal = Effect.fn("readStatusDetailsLocal")(function* (
     cwd: string,
     options?: GitVcsDriver.GitLocalStatusOptions,
@@ -1844,6 +1977,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       "status",
       "--porcelain=2",
       "--branch",
+      "-z",
+      "--untracked-files=all",
       ...(includeDivergence ? [] : ["--no-ahead-behind"]),
     ];
     const indexResult = yield* executeGitWithStableDiagnostics(
@@ -1887,6 +2022,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       cwd,
       statusArgs,
       {
+        maxOutputBytes: REVIEW_METADATA_MAX_OUTPUT_BYTES,
         allowNonZeroExit: true,
       },
     ).pipe(
@@ -1917,6 +2053,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       });
     }
 
+    if (statusResult.stdoutTruncated) {
+      return yield* new GitCommandError({
+        operation: "GitVcsDriver.statusDetails.status",
+        command: "git",
+        cwd,
+        detail: "Git status exceeded the file metadata limit.",
+      });
+    }
     const repositoryPaths = yield* resolveRepositoryPaths(cwd).pipe(
       Effect.catchTags({ GitCommandError: () => Effect.succeed(null) }),
     );
@@ -1999,7 +2143,13 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     let hasWorkingTreeChanges = false;
     const changedFilesWithoutNumstat = new Set<string>();
 
-    for (const line of statusStdout.split(/\r?\n/g)) {
+    const workingChanges = new Map<
+      string,
+      NonNullable<GitVcsDriver.GitStatusDetails["fileChanges"]>["files"][number]
+    >();
+    const records = statusStdout.split("\0");
+    for (let index = 0; index < records.length; index++) {
+      const line = records[index]!;
       if (line.startsWith("# branch.head ")) {
         const value = line.slice("# branch.head ".length).trim();
         refName = value.startsWith("(") ? null : value;
@@ -2020,7 +2170,22 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       if (line.trim().length > 0 && !line.startsWith("#")) {
         hasWorkingTreeChanges = true;
         const pathValue = parsePorcelainPath(line);
-        if (pathValue) changedFilesWithoutNumstat.add(pathValue);
+        if (pathValue && isRepositoryFilePath(pathValue)) {
+          changedFilesWithoutNumstat.add(pathValue);
+          const indexStatus = line[2];
+          const worktreeStatus = line[3];
+          const kind =
+            line.startsWith("? ") || indexStatus === "A" || worktreeStatus === "A"
+              ? "added"
+              : indexStatus === "D" || worktreeStatus === "D"
+                ? "deleted"
+                : line.startsWith("2 ")
+                  ? "renamed"
+                  : "modified";
+          workingChanges.set(pathValue, { path: pathValue, kind, uncommitted: true });
+        }
+        // In NUL porcelain, rename/copy records have a second, original-path record.
+        if (line.startsWith("2 ")) index++;
       }
     }
 
@@ -2067,6 +2232,27 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     }
     files.sort((a, b) => a.path.localeCompare(b.path));
 
+    const rootFileChanges = yield* readFileChanges(
+      repositoryPaths?.worktreeRoot ?? cwd,
+      refName,
+      upstreamRef,
+      workingChanges,
+    ).pipe(Effect.orElseSucceed(() => ({ baseRef: null, files: [...workingChanges.values()] })));
+
+    const projectPrefix = path
+      .relative(repositoryPaths?.worktreeRoot ?? cwd, cwd)
+      .split(path.sep)
+      .join("/");
+    const fileChanges = {
+      baseRef: rootFileChanges.baseRef,
+      files: rootFileChanges.files.flatMap((file) => {
+        if (!projectPrefix) return [file];
+        return file.path.startsWith(`${projectPrefix}/`)
+          ? [{ ...file, path: file.path.slice(projectPrefix.length + 1) }]
+          : [];
+      }),
+    };
+
     const branchChanges = options?.includeBranchChanges
       ? yield* readBranchChangeTotals(repositoryPaths?.worktreeRoot ?? cwd, refName).pipe(
           Effect.orElseSucceed(() => undefined),
@@ -2086,6 +2272,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         deletions,
       },
       ...(branchChanges ? { branchChanges } : {}),
+      fileChanges,
       hasUpstream: upstreamRef !== null,
       aheadCount,
       behindCount,

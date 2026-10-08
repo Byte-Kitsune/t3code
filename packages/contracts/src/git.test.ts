@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 
 import {
   VcsCreateWorktreeInput,
+  VcsStatusStreamEvent,
   GitPreparePullRequestThreadInput,
   GitPreparePullRequestThreadResult,
   GitRunStackedActionResult,
@@ -165,5 +166,31 @@ describe("GitRunStackedActionResult", () => {
     if (parsed.toast.cta.kind === "run_action") {
       expect(parsed.toast.cta.action.kind).toBe("create_pr");
     }
+  });
+});
+
+describe("file changes in Git status streams", () => {
+  it("preserves pending file metadata and unusual path bytes across local status encoding", () => {
+    const event = {
+      _tag: "localUpdated" as const,
+      local: {
+        isRepo: true,
+        hasPrimaryRemote: true,
+        isDefaultRef: false,
+        refName: "feature",
+        hasWorkingTreeChanges: true,
+        workingTree: { files: [], insertions: 0, deletions: 0 },
+        fileChanges: {
+          baseRef: "origin/feature",
+          files: [
+            { path: "artifact/new file.php", kind: "added" as const, uncommitted: false },
+            { path: " leading\tand\ntrailing ", kind: "modified" as const, uncommitted: true },
+          ],
+        },
+      },
+    };
+    const encode = Schema.encodeSync(Schema.fromJsonString(VcsStatusStreamEvent));
+    const decode = Schema.decodeUnknownSync(Schema.fromJsonString(VcsStatusStreamEvent));
+    expect(decode(encode(event))).toEqual(event);
   });
 });

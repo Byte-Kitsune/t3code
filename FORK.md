@@ -21,6 +21,11 @@ features, rather than a release log or a list of future tasks.
   ignored.
 - Match files to the most specific enabled area boundary. Shared grouping helpers
   retain an **Other** bucket for unmatched files.
+- **Changed Files** is a Git-backed repository-wide filter for untracked, staged,
+  unstaged and committed-but-unpushed files. It remains independent of area
+  boundaries. Red takes priority for all uncommitted changes; committed added
+  files are green and committed modifications blue. Preserve the local status
+  metadata across the Git driver, status contracts/subscription and file tree.
 - The File Viewer sidebar offers a focused area tree/search and **All repository**.
   Recently used areas appear first. Selection and recency are stored locally per
   environment and project; they are not shared repository configuration.

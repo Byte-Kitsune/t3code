@@ -19,6 +19,8 @@ import {
 } from "~/components/ui/select";
 import {
   ALL_REPOSITORY_GROUP,
+  CHANGED_FILES_GROUP,
+  visitChangedFilesGroup,
   fileBrowserGroupValue,
   fileBrowserGroupStorageKey,
   readFileBrowserGroupPreference,
@@ -51,6 +53,14 @@ import { areAllDirectoriesExpanded, setAllDirectoriesExpanded } from "./fileTree
 import { buildFileTreePathUpdates } from "./fileTreePathReconciliation";
 import { useDirectoryEntries } from "./useDirectoryEntries";
 import { useProjectPathSearch } from "~/state/queries";
+import { useEnvironmentQuery } from "~/state/query";
+import { vcsEnvironment } from "~/state/vcs";
+import {
+  changedFileBrowserEntries,
+  fileBrowserGitStatuses,
+  FILE_BROWSER_CHANGE_CSS,
+} from "./fileBrowserChanges";
+const EMPTY_FILE_CHANGES = [] as const;
 
 interface FileBrowserPanelProps {
   environmentId: EnvironmentId;
@@ -152,13 +162,20 @@ export default function FileBrowserPanel({
     () => orderFileBrowserGroups(monolith.areas, groupPreference.recentAreaIds),
     [monolith.areas, groupPreference.recentAreaIds],
   );
+  const gitStatus = useEnvironmentQuery(vcsEnvironment.status({ environmentId, input: { cwd } }));
+  const fileChanges = gitStatus.data?.fileChanges?.files ?? EMPTY_FILE_CHANGES;
+  const changedFiles = groupPreference.changedFiles === true;
+  const deletedCount = fileChanges.filter((change) => change.kind === "deleted").length;
   const activeGroup = groups.find((group) => group.id === groupPreference.activeAreaId) ?? null;
-  const activeGroupPath = activeGroup?.path ?? null;
-  const groupLabel = activeGroup?.name ?? "All repository";
+  const activeGroupPath = changedFiles ? null : (activeGroup?.path ?? null);
+  const groupScope = changedFiles
+    ? CHANGED_FILES_GROUP
+    : fileBrowserGroupValue(groupPreference.activeAreaId);
+  const groupLabel = changedFiles ? "Changed Files" : (activeGroup?.name ?? "All repository");
   const handledGroupReveal = useRef<string | null>(null);
   const expandedGroupRoot = useRef<string | null>(null);
   useEffect(() => {
-    if (monolith.loading || monolith.config === null) return;
+    if (monolith.loading || (monolith.config === null && !changedFiles)) return;
     writeFileBrowserGroupPreference(groupStorage(), groupStorageKey, groupPreference);
     if (JSON.stringify(rawGroupPreference) !== JSON.stringify(groupPreference))
       queueMicrotask(() =>
@@ -168,7 +185,14 @@ export default function FileBrowserPanel({
             : current,
         ),
       );
-  }, [groupStorageKey, groupPreference, monolith.loading, monolith.config, rawGroupPreference]);
+  }, [
+    groupStorageKey,
+    groupPreference,
+    monolith.loading,
+    monolith.config,
+    rawGroupPreference,
+    changedFiles,
+  ]);
   const {
     entries: directoryEntries,
     load,
@@ -183,11 +207,12 @@ export default function FileBrowserPanel({
     {
       environmentId,
       cwd: fileBrowserGroupSearchCwd(cwd, activeGroupPath),
-      query: query.slice(0, 256),
+      query: changedFiles ? "" : query.slice(0, 256),
     },
     200,
   );
   const entries = useMemo(() => {
+    if (changedFiles) return changedFileBrowserEntries(fileChanges);
     const result = new Map(directoryEntries.map((entry) => [entry.path, entry]));
     if (query.trim() && !pathSearch.isPending) {
       for (const entry of prefixFileBrowserGroupEntries(pathSearch.entries, activeGroupPath)) {
@@ -202,7 +227,15 @@ export default function FileBrowserPanel({
     return [...result.values()].filter((entry) =>
       isPathInFileBrowserGroup(entry.path, activeGroupPath),
     );
-  }, [directoryEntries, pathSearch.entries, pathSearch.isPending, query, activeGroupPath]);
+  }, [
+    directoryEntries,
+    pathSearch.entries,
+    pathSearch.isPending,
+    query,
+    activeGroupPath,
+    changedFiles,
+    fileChanges,
+  ]);
   const entryKinds = useMemo(
     () => new Map(entries.map((entry) => [entry.path, entry.kind] as const)),
     [entries],
@@ -356,11 +389,15 @@ export default function FileBrowserPanel({
     paths: [],
     search: false,
     onSearchChange: (value) => setQuery(value ?? ""),
-    unsafeCSS: PIERRE_TREE_UNSAFE_CSS,
+    unsafeCSS: `${PIERRE_TREE_UNSAFE_CSS}\n${FILE_BROWSER_CHANGE_CSS}`,
   });
   const search = useFileTreeSearch(model);
-  const chooseGroup = (areaId: string | null) => {
-    setRawGroupPreference(visitFileBrowserGroup(groupPreference, areaId));
+  const chooseGroup = (areaId: string | null, changed = false) => {
+    setRawGroupPreference(
+      changed
+        ? visitChangedFilesGroup(groupPreference)
+        : visitFileBrowserGroup(groupPreference, areaId),
+    );
     setQuery("");
     search.close();
     setExpandAll(false);
@@ -368,7 +405,7 @@ export default function FileBrowserPanel({
     expandedGroupRoot.current = null;
   };
   useEffect(() => {
-    if (activeGroupPath === null) return;
+    if (changedFiles || activeGroupPath === null) return;
     const controller = new AbortController();
     void (async () => {
       for (const directory of fileBrowserGroupDirectories(activeGroupPath)) {
@@ -377,20 +414,23 @@ export default function FileBrowserPanel({
       }
     })();
     return () => controller.abort();
-  }, [activeGroupPath, load]);
+  }, [activeGroupPath, changedFiles, load]);
   useEffect(() => {
     if (!selectedPath || monolith.loading || monolith.config === null) return;
     const key = `${selectedPath}:${selectedPathRevealId}`;
     if (handledGroupReveal.current === key) return;
     handledGroupReveal.current = key;
+    if (changedFiles) return;
     const matching = matchFileBrowserGroup(selectedPath, monolith.areas);
-    setRawGroupPreference((current) =>
-      visitFileBrowserGroup(
-        reconcileFileBrowserGroupPreference(current, monolith.areas),
-        matching?.id ?? null,
-      ),
-    );
-    setQuery("");
+    queueMicrotask(() => {
+      setRawGroupPreference((current) =>
+        visitFileBrowserGroup(
+          reconcileFileBrowserGroupPreference(current, monolith.areas),
+          matching?.id ?? null,
+        ),
+      );
+      setQuery("");
+    });
     model.closeSearch();
   }, [
     selectedPath,
@@ -398,6 +438,7 @@ export default function FileBrowserPanel({
     monolith.loading,
     monolith.config,
     monolith.areas,
+    changedFiles,
     model,
   ]);
   const allDirectoriesExpanded = useFileTreeSelector(model, (currentModel) =>
@@ -419,7 +460,7 @@ export default function FileBrowserPanel({
       if (!currentPaths.has(path)) expandedPathsRef.current.delete(path);
     }
     const loadExpanded = () => {
-      if (model.isSearchOpen()) return;
+      if (changedFiles || model.isSearchOpen()) return;
       for (const path of directoryPaths) {
         const item = model.getItem(path);
         if (item?.isDirectory() && "isExpanded" in item && item.isExpanded()) {
@@ -435,19 +476,12 @@ export default function FileBrowserPanel({
     };
     loadExpanded();
     return model.subscribe(loadExpanded);
-  }, [directoryPaths, load, model]);
+  }, [directoryPaths, load, model, changedFiles]);
   useEffect(() => {
-    model.setGitStatus(
-      entries
-        .filter((entry) => entry.ignored)
-        .map((entry) => ({
-          path: treePath(entry),
-          status: "ignored",
-        })),
-    );
-  }, [entries, model]);
+    model.setGitStatus(fileBrowserGitStatuses(entries, fileChanges));
+  }, [entries, fileChanges, model]);
   useEffect(() => {
-    if (!selectedPath) return;
+    if (changedFiles || !selectedPath) return;
     const controller = new AbortController();
     void (async () => {
       const segments = selectedPath.split("/");
@@ -458,7 +492,7 @@ export default function FileBrowserPanel({
     return () => {
       controller.abort();
     };
-  }, [load, selectedPath]);
+  }, [load, selectedPath, changedFiles]);
   const handleSearchValueChange = (value: string) => {
     setQuery(value);
     if (value.trim().length === 0) {
@@ -469,35 +503,37 @@ export default function FileBrowserPanel({
   };
   const handleRefresh = () => {
     refresh();
-    if (query.trim()) pathSearch.refresh();
+    gitStatus.refresh();
+    if (!changedFiles && query.trim()) pathSearch.refresh();
     onRefreshSelectedFile?.();
   };
   useWorkspaceMutationRefresh({
     mutationId: workspaceMutationId,
     refresh: () => {
       refresh();
-      if (query.trim()) pathSearch.refresh();
+      gitStatus.refresh();
+      if (!changedFiles && query.trim()) pathSearch.refresh();
     },
     resourceKey: `files:${environmentId}:${cwd}`,
   });
 
   useEffect(() => {
-    if (!ready) return;
+    if (changedFiles ? gitStatus.data === null : !ready) return;
     if (previousTreePathsRef.current === treePaths) return;
     entryKindsRef.current = entryKinds;
     const previousTreePaths = previousTreePathsRef.current;
     previousTreePathsRef.current = treePaths;
-    if (previousTreePaths === null || previousGroupPathRef.current !== activeGroupPath) {
+    if (previousTreePaths === null || previousGroupPathRef.current !== groupScope) {
       // Reset group boundaries so implicit parent folders from the previous
       // scope cannot survive after all their visible entries were removed.
-      previousGroupPathRef.current = activeGroupPath;
+      previousGroupPathRef.current = groupScope;
       expandedGroupRoot.current = null;
       model.resetPaths(treePaths);
       return;
     }
     const updates = buildFileTreePathUpdates(previousTreePaths, treePaths);
     if (updates.length > 0) model.batch(updates);
-  }, [ready, entryKinds, model, treePaths, activeGroupPath]);
+  }, [ready, entryKinds, model, treePaths, groupScope, changedFiles, gitStatus.data]);
 
   useEffect(() => {
     if (activeGroupPath === null || activeGroupPath === ".") {
@@ -623,52 +659,56 @@ export default function FileBrowserPanel({
       className="flex min-h-0 flex-1 flex-col bg-background"
       data-file-browser-panel={`${environmentId}:${cwd}`}
     >
-      {groups.length > 0 ? (
-        <div className="shrink-0 border-b border-border/60 px-2 py-1.5">
-          <Select
-            value={fileBrowserGroupValue(groupPreference.activeAreaId)}
-            items={[
-              ...groups.map((group) => ({
-                value: fileBrowserGroupValue(group.id),
-                label: group.name,
-              })),
-              { value: ALL_REPOSITORY_GROUP, label: "All repository" },
-            ]}
-            onValueChange={(value) => {
-              if (value === ALL_REPOSITORY_GROUP) chooseGroup(null);
-              else if (typeof value === "string" && value.startsWith("area:"))
-                chooseGroup(value.slice(5));
-            }}
-          >
-            <SelectTrigger size="sm" className="w-full" aria-label="File browser project area">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectPopup>
-              {groups.map((group) => (
-                <SelectItem key={group.id} value={fileBrowserGroupValue(group.id)}>
-                  {group.name}
-                </SelectItem>
-              ))}
-              <SelectItem value={ALL_REPOSITORY_GROUP}>All repository</SelectItem>
-            </SelectPopup>
-          </Select>
-          {activeGroup ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={<div className="truncate px-1 pt-1 text-3xs text-muted-foreground" />}
-              >
-                {activeGroup.path}
-              </TooltipTrigger>
-              <TooltipPopup>{activeGroup.path}</TooltipPopup>
-            </Tooltip>
-          ) : null}
-        </div>
-      ) : null}
+      <div className="shrink-0 border-b border-border/60 px-2 py-1.5">
+        <Select
+          value={groupScope}
+          items={[
+            { value: CHANGED_FILES_GROUP, label: "Changed Files" },
+            ...groups.map((group) => ({
+              value: fileBrowserGroupValue(group.id),
+              label: group.name,
+            })),
+            { value: ALL_REPOSITORY_GROUP, label: "All repository" },
+          ]}
+          onValueChange={(value) => {
+            if (value === CHANGED_FILES_GROUP) chooseGroup(null, true);
+            else if (value === ALL_REPOSITORY_GROUP) chooseGroup(null);
+            else if (typeof value === "string" && value.startsWith("area:"))
+              chooseGroup(value.slice(5));
+          }}
+        >
+          <SelectTrigger size="sm" className="w-full" aria-label="File browser project area">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectPopup>
+            <SelectItem value={CHANGED_FILES_GROUP}>Changed Files</SelectItem>
+            {groups.map((group) => (
+              <SelectItem key={group.id} value={fileBrowserGroupValue(group.id)}>
+                {group.name}
+              </SelectItem>
+            ))}
+            <SelectItem value={ALL_REPOSITORY_GROUP}>All repository</SelectItem>
+          </SelectPopup>
+        </Select>
+        {activeGroup && !changedFiles ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={<div className="truncate px-1 pt-1 text-3xs text-muted-foreground" />}
+            >
+              {activeGroup.path}
+            </TooltipTrigger>
+            <TooltipPopup>{activeGroup.path}</TooltipPopup>
+          </Tooltip>
+        ) : null}
+      </div>
       <div
         className="flex h-10 min-h-10 shrink-0 items-center gap-1 border-b border-border/60 bg-background px-2 in-data-[preview-panel-mode=inline]:mb-1 in-data-[preview-panel-mode=inline]:h-9 in-data-[preview-panel-mode=inline]:min-h-9 in-data-[preview-panel-mode=inline]:border-b-transparent"
         data-surface-subheader
       >
-        <RefreshFilesButton isPending={isPending} onRefresh={handleRefresh} />
+        <RefreshFilesButton
+          isPending={changedFiles ? gitStatus.isPending : isPending}
+          onRefresh={handleRefresh}
+        />
         <FileSearchField
           name="project-files-search"
           ariaLabel={`Search ${groupLabel} files`}
@@ -704,7 +744,22 @@ export default function FileBrowserPanel({
           </Tooltip>
         ) : null}
       </div>
-      {error || pathSearch.error ? (
+      {changedFiles ? (
+        <div className="px-3 py-1 text-xs text-muted-foreground">
+          {gitStatus.data === null
+            ? "Loading Git changes…"
+            : gitStatus.data.fileChanges === undefined
+              ? "Changed files require a compatible server."
+              : `${fileChanges.length - deletedCount} files not yet pushed`}
+          {deletedCount > 0 ? ` · ${deletedCount} deleted (not shown)` : ""}
+        </div>
+      ) : null}
+      {gitStatus.error && changedFiles ? (
+        <div role="alert" className="px-3 py-1 text-xs text-destructive">
+          {gitStatus.error}
+        </div>
+      ) : null}
+      {!changedFiles && (error || pathSearch.error) ? (
         <button
           type="button"
           onClick={handleRefresh}
@@ -713,16 +768,31 @@ export default function FileBrowserPanel({
           {error ?? pathSearch.error} Click to retry.
         </button>
       ) : null}
-      {query.trim() && pathSearch.truncated && !pathSearch.isPending ? (
+      {!changedFiles && query.trim() && pathSearch.truncated && !pathSearch.isPending ? (
         <div className="px-3 py-1 text-xs text-muted-foreground">
           More matches available. Refine your search.
         </div>
       ) : null}
-      {(isPending || pathSearch.isPending) && (
+      {!changedFiles && (isPending || pathSearch.isPending) && (
         <div role="status" className="px-3 py-1 text-xs text-muted-foreground">
           Loading files…
         </div>
       )}
+      <div className="shrink-0 border-t border-border/60 px-3 py-1 text-3xs text-muted-foreground">
+        <Tooltip>
+          <TooltipTrigger render={<span tabIndex={0} />}>
+            <span className="text-error-foreground">Uncommitted</span>
+            {" · "}
+            <span className="text-success-foreground">New</span>
+            {" · "}
+            <span className="text-info-foreground">Changed</span>
+          </TooltipTrigger>
+          <TooltipPopup>
+            Red: uncommitted changes, including new files. Green: new files committed but not
+            pushed. Blue: existing files changed in commits not yet pushed.
+          </TooltipPopup>
+        </Tooltip>
+      </div>
       <FileTree
         model={model}
         aria-label={`${projectName} ${groupLabel} files`}

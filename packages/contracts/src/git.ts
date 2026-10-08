@@ -242,6 +242,19 @@ const VcsStatusLocalShape = {
     insertions: NonNegativeInt,
     deletions: NonNegativeInt,
   }),
+  /** Working tree changes and local commits absent from the locally known publish ref. */
+  fileChanges: Schema.optional(
+    Schema.Struct({
+      baseRef: Schema.NullOr(Schema.String),
+      files: Schema.Array(
+        Schema.Struct({
+          path: Schema.String,
+          kind: Schema.Literals(["added", "modified", "deleted", "renamed"]),
+          uncommitted: Schema.Boolean,
+        }),
+      ),
+    }),
+  ),
   /**
    * Totals for the diff panel's Changes view: merge-base with the base branch to the
    * working tree, untracked files included. Absent on older servers.

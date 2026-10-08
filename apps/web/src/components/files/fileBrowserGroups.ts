@@ -2,9 +2,11 @@ import type { MonolithArea, ProjectEntry } from "@t3tools/contracts";
 
 export interface FileBrowserGroupPreference {
   readonly activeAreaId: string | null;
+  readonly changedFiles?: boolean;
   readonly recentAreaIds: readonly string[];
 }
 export const ALL_REPOSITORY_GROUP = "repository";
+export const CHANGED_FILES_GROUP = "changed-files";
 export const fileBrowserGroupValue = (areaId: string | null) =>
   areaId === null ? ALL_REPOSITORY_GROUP : `area:${areaId}`;
 export const fileBrowserGroupStorageKey = (environmentId: string, cwd: string) =>
@@ -32,6 +34,7 @@ export function readFileBrowserGroupPreference(
       return null;
     return {
       activeAreaId: preference.activeAreaId as string | null,
+      ...(preference.changedFiles === true ? { changedFiles: true } : {}),
       recentAreaIds: [...new Set(preference.recentAreaIds as string[])],
     };
   } catch {
@@ -76,7 +79,11 @@ export function reconcileFileBrowserGroupPreference(
         : preference === null
           ? (orderFileBrowserGroups(enabled, recentAreaIds)[0]?.id ?? null)
           : null;
-  return { activeAreaId, recentAreaIds };
+  return {
+    activeAreaId,
+    recentAreaIds,
+    ...(preference?.changedFiles === true ? { changedFiles: true } : {}),
+  };
 }
 export function visitFileBrowserGroup(
   preference: FileBrowserGroupPreference,
@@ -122,4 +129,10 @@ export function prefixFileBrowserGroupEntries(
   return areaPath === null || areaPath === "."
     ? entries
     : entries.map((entry) => ({ ...entry, path: `${areaPath}/${entry.path}` }));
+}
+
+export function visitChangedFilesGroup(
+  preference: FileBrowserGroupPreference,
+): FileBrowserGroupPreference {
+  return { ...preference, changedFiles: true };
 }

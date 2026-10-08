@@ -1060,6 +1060,7 @@ export const make = Effect.gen(function* () {
       refName: details.branch,
       hasWorkingTreeChanges: details.hasWorkingTreeChanges,
       workingTree: details.workingTree,
+      ...(details.fileChanges ? { fileChanges: details.fileChanges } : {}),
       ...(details.branchChanges ? { branchChanges: details.branchChanges } : {}),
     } satisfies VcsStatusLocalResult;
   });

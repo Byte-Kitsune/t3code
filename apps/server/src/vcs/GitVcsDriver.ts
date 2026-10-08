@@ -77,6 +77,7 @@ export interface GitStatusDetails {
   hasWorkingTreeChanges: boolean;
   workingTree: VcsStatusResult["workingTree"];
   branchChanges?: VcsStatusResult["branchChanges"];
+  fileChanges?: VcsStatusResult["fileChanges"];
   hasUpstream: boolean;
   aheadCount: number;
   behindCount: number;

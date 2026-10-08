@@ -332,7 +332,7 @@ it.effect("uses stable diagnostics for every parsed non-repository command", () 
 
     assert.deepStrictEqual(commands, [
       { args: ["rev-parse", "--git-path", "index"], lcAll: "C" },
-      { args: ["status", "--porcelain=2", "--branch"], lcAll: "C" },
+      { args: ["status", "--porcelain=2", "--branch", "-z", "--untracked-files=all"], lcAll: "C" },
       { args: ["rev-parse", "--abbrev-ref", "HEAD"], lcAll: "C" },
       { args: ["rev-parse", "--git-common-dir"], lcAll: "C" },
     ]);
@@ -2210,6 +2210,143 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
   });
 
   describe("repository status", () => {
+    it.effect(
+      "unions unpublished commits and dirty files, clearing published commits after push",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const remote = yield* makeTmpDir();
+          yield* initRepoWithCommit(cwd);
+          yield* git(cwd, ["branch", "-M", "main"]);
+          yield* git(remote, ["init", "--bare"]);
+          yield* git(cwd, ["remote", "add", "origin", remote]);
+          yield* git(cwd, ["push", "-u", "origin", "main"]);
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          assert.deepStrictEqual((yield* driver.statusDetailsLocal(cwd)).fileChanges?.files, []);
+          yield* writeTextFile(cwd, "README.md", "changed\n");
+          yield* writeTextFile(cwd, "area/new file.ts", "new\n");
+          yield* git(cwd, ["add", "."]);
+          yield* git(cwd, ["commit", "-m", "unpublished"]);
+          yield* writeTextFile(cwd, "area/new file.ts", "changed again\n");
+          yield* writeTextFile(cwd, "untracked.ts", "new\n");
+          yield* writeTextFile(cwd, "staged.ts", "new staged\n");
+          yield* git(cwd, ["add", "staged.ts"]);
+          const files = (yield* driver.statusDetailsLocal(cwd)).fileChanges!.files;
+          assert.deepInclude(files, { path: "README.md", kind: "modified", uncommitted: false });
+          assert.deepInclude(files, { path: "area/new file.ts", kind: "added", uncommitted: true });
+          assert.deepInclude(files, { path: "untracked.ts", kind: "added", uncommitted: true });
+          assert.deepInclude(files, { path: "staged.ts", kind: "added", uncommitted: true });
+          const nested = (yield* driver.statusDetailsLocal(`${cwd}/area`)).fileChanges!.files;
+          assert.deepStrictEqual(nested, [
+            { path: "new file.ts", kind: "added", uncommitted: true },
+          ]);
+          yield* git(cwd, ["push"]);
+          const published = (yield* driver.statusDetailsLocal(cwd)).fileChanges!.files;
+          assert.isFalse(published.some((file) => file.path === "README.md"));
+          assert.deepInclude(published, {
+            path: "area/new file.ts",
+            kind: "modified",
+            uncommitted: true,
+          });
+        }),
+    );
+
+    it.effect("reports only dirty files at a published detached HEAD", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const remote = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["branch", "-M", "main"]);
+        yield* git(remote, ["init", "--bare"]);
+        yield* git(cwd, ["remote", "add", "origin", remote]);
+        yield* git(cwd, ["push", "-u", "origin", "main"]);
+        yield* git(cwd, ["checkout", "--detach", "HEAD"]);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        assert.deepStrictEqual((yield* driver.statusDetailsLocal(cwd)).fileChanges!.files, []);
+        yield* writeTextFile(cwd, "README.md", "dirty\n");
+        assert.deepStrictEqual((yield* driver.statusDetailsLocal(cwd)).fileChanges!.files, [
+          { path: "README.md", kind: "modified", uncommitted: true },
+        ]);
+      }),
+    );
+
+    it.effect("preserves unusual paths, committed renames, and deletions", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["branch", "-M", "main"]);
+        yield* writeTextFile(cwd, "delete.txt", "remove\n");
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "baseline"]);
+        yield* git(cwd, ["checkout", "-b", "feature"]);
+        yield* git(cwd, ["mv", "README.md", "renamed file.md"]);
+        yield* git(cwd, ["rm", "delete.txt"]);
+        yield* writeTextFile(cwd, " leading trailing ", "space\n");
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "new files"]);
+        yield* writeTextFile(cwd, "tab\tnewline\nfile.ts", "untracked\n");
+        const files = (yield* (yield* GitVcsDriver.GitVcsDriver).statusDetailsLocal(cwd))
+          .fileChanges!.files;
+        assert.deepInclude(files, { path: "renamed file.md", kind: "renamed", uncommitted: false });
+        assert.deepInclude(files, { path: "delete.txt", kind: "deleted", uncommitted: false });
+        assert.deepInclude(files, {
+          path: " leading trailing ",
+          kind: "added",
+          uncommitted: false,
+        });
+        assert.deepInclude(files, {
+          path: "tab\tnewline\nfile.ts",
+          kind: "added",
+          uncommitted: true,
+        });
+      }),
+    );
+
+    it.effect("does not report remote-only changes when behind or diverged", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const remote = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["branch", "-M", "main"]);
+        yield* git(remote, ["init", "--bare"]);
+        yield* git(cwd, ["remote", "add", "origin", remote]);
+        yield* git(cwd, ["push", "-u", "origin", "main"]);
+        yield* git(cwd, ["checkout", "-b", "remote-edit"]);
+        yield* writeTextFile(cwd, "remote-only.ts", "remote\n");
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "remote"]);
+        yield* git(cwd, ["push", "origin", "HEAD:main"]);
+        yield* git(cwd, ["checkout", "main"]);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        assert.deepStrictEqual((yield* driver.statusDetailsLocal(cwd)).fileChanges!.files, []);
+        yield* writeTextFile(cwd, "local-only.ts", "local\n");
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "local"]);
+        assert.deepStrictEqual((yield* driver.statusDetailsLocal(cwd)).fileChanges!.files, [
+          { path: "local-only.ts", kind: "added", uncommitted: false },
+        ]);
+      }),
+    );
+
+    it.effect("handles unborn repositories and unpublished repositories without a remote", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* git(cwd, ["init"]);
+        yield* writeTextFile(cwd, "first.ts", "first\n");
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        assert.deepStrictEqual((yield* driver.statusDetailsLocal(cwd)).fileChanges!.files, [
+          { path: "first.ts", kind: "added", uncommitted: true },
+        ]);
+        yield* git(cwd, ["config", "user.name", "Test"]);
+        yield* git(cwd, ["config", "user.email", "test@example.com"]);
+        yield* git(cwd, ["add", "."]);
+        yield* git(cwd, ["commit", "-m", "initial"]);
+        assert.deepStrictEqual((yield* driver.statusDetailsLocal(cwd)).fileChanges!.files, [
+          { path: "first.ts", kind: "added", uncommitted: false },
+        ]);
+      }),
+    );
+
     it.effect("reads Changes totals with untracked files when requested", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();

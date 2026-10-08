@@ -14,6 +14,8 @@ import {
   prefixFileBrowserGroupEntries,
   fileBrowserGroupValue,
   ALL_REPOSITORY_GROUP,
+  CHANGED_FILES_GROUP,
+  visitChangedFilesGroup,
 } from "./fileBrowserGroups";
 const areas: readonly MonolithArea[] = [
   { id: "php", name: "Catalog", path: "artifact/catalog", kind: "php" },
@@ -135,5 +137,33 @@ describe("file browser project groups", () => {
         "k",
       )?.recentAreaIds,
     ).toEqual(["php"]);
+  });
+  it("persists Changed Files independently of area IDs and preserves recent groups when returning", () => {
+    const preference = visitChangedFilesGroup({
+      activeAreaId: "docs",
+      recentAreaIds: ["docs", "php"],
+    });
+    expect(reconcileFileBrowserGroupPreference(preference, areas)).toEqual({
+      activeAreaId: "docs",
+      recentAreaIds: ["docs", "php"],
+      changedFiles: true,
+    });
+    expect(reconcileFileBrowserGroupPreference(preference, [])).toEqual({
+      activeAreaId: null,
+      recentAreaIds: [],
+      changedFiles: true,
+    });
+    expect(visitFileBrowserGroup(preference, "php")).toEqual({
+      activeAreaId: "php",
+      recentAreaIds: ["php", "docs"],
+    });
+    expect(fileBrowserGroupValue(CHANGED_FILES_GROUP)).not.toBe(CHANGED_FILES_GROUP);
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    };
+    writeFileBrowserGroupPreference(storage, "key", preference);
+    expect(readFileBrowserGroupPreference(storage, "key")).toEqual(preference);
   });
 });

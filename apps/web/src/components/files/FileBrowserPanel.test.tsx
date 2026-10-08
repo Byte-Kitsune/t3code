@@ -9,10 +9,25 @@ import { fileBrowserGroupStorageKey, readFileBrowserGroupPreference } from "./fi
 const mocks = vi.hoisted(() => ({
   load: vi.fn(async (_path: string) => {}),
   search: vi.fn(),
+  changes: [] as {
+    path: string;
+    kind: "added" | "modified" | "deleted" | "renamed";
+    uncommitted: boolean;
+  }[],
+  refreshGit: vi.fn(),
   areas: [
     { id: "php", name: "Catalog", path: "artifact/catalog", kind: "php" },
     { id: "docs", name: "Docs", path: "docs", kind: "folder" },
   ],
+}));
+vi.mock("~/state/vcs", () => ({ vcsEnvironment: { status: () => null } }));
+vi.mock("~/state/query", () => ({
+  useEnvironmentQuery: () => ({
+    data: { isRepo: true, fileChanges: { baseRef: "origin/main", files: mocks.changes } },
+    refresh: mocks.refreshGit,
+    error: null,
+    isPending: false,
+  }),
 }));
 vi.mock("~/hooks/useMonolithAreas", () => ({
   useMonolithAreas: () => ({ areas: mocks.areas, config: { areas: mocks.areas }, loading: false }),
@@ -80,6 +95,8 @@ describe("file browser group switching", () => {
     values.clear();
     mocks.load.mockClear();
     mocks.search.mockClear();
+    mocks.changes = [];
+    mocks.refreshGit.mockClear();
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.stubGlobal("window", { localStorage: storage });
     vi.stubGlobal("document", { addEventListener: () => {}, removeEventListener: () => {} });
@@ -126,5 +143,65 @@ describe("file browser group switching", () => {
       ),
     );
     expect(renderer!.root.findByType(Select).props.value).toBe("area:docs");
+  });
+  it("shows changes across groups and unopened folders, searches locally, and keeps the filter while opening a file", async () => {
+    mocks.changes = [
+      { path: "docs/readme.md", kind: "modified", uncommitted: false },
+      { path: "unloaded/new/deep.ts", kind: "added", uncommitted: true },
+      { path: "artifact/catalog/src/Removed.php", kind: "deleted", uncommitted: true },
+      ...Array.from({ length: 210 }, (_, index) => ({
+        path: `unloaded/file${index}.ts`,
+        kind: "modified" as const,
+        uncommitted: false,
+      })),
+    ];
+    await act(async () => {
+      renderer = create(<FileBrowserPanel {...props} />);
+    });
+    await act(async () => renderer!.root.findByType(Select).props.onValueChange("changed-files"));
+    expect(model().getItem("docs/readme.md")).not.toBeNull();
+    expect(model().getItem("unloaded/new/deep.ts")).not.toBeNull();
+    expect(model().getItem("unloaded/file209.ts")).not.toBeNull();
+    expect(model().getItem("artifact/catalog/src/Removed.php")).toBeNull();
+    expect(model().getItem("artifact/catalog/src/Demo.php")).toBeNull();
+    await act(async () => model().getItem("unloaded/new/deep.ts").select());
+    expect(props.onOpenFile).toHaveBeenLastCalledWith("unloaded/new/deep.ts");
+    await act(async () =>
+      renderer!.update(<FileBrowserPanel {...props} selectedPath="unloaded/new/deep.ts" />),
+    );
+    expect(renderer!.root.findByType(Select).props.value).toBe("changed-files");
+    expect(
+      readFileBrowserGroupPreference(storage, fileBrowserGroupStorageKey("local", "/repo"))
+        ?.changedFiles,
+    ).toBe(true);
+    await act(async () => model().setSearch("file209"));
+    expect(mocks.search).toHaveBeenLastCalledWith(expect.objectContaining({ query: "" }));
+    expect(model().getItem("unloaded/file209.ts")).not.toBeNull();
+    await act(async () => renderer!.root.findByType(Select).props.onValueChange("area:docs"));
+    expect(renderer!.root.findByType(Select).props.value).toBe("area:docs");
+    expect(model().getItem("unloaded/new/deep.ts")).toBeNull();
+  });
+  it("restores the changed filter and removes paths immediately after a push status update", async () => {
+    values.set(
+      fileBrowserGroupStorageKey("local", "/repo"),
+      JSON.stringify({ activeAreaId: "php", recentAreaIds: ["php", "docs"], changedFiles: true }),
+    );
+    mocks.changes = [{ path: "docs/readme.md", kind: "modified", uncommitted: false }];
+    await act(async () => {
+      renderer = create(<FileBrowserPanel {...props} selectedPath="docs/readme.md" />);
+    });
+    expect(renderer!.root.findByType(Select).props.value).toBe("changed-files");
+    expect(model().getItem("docs/readme.md")).not.toBeNull();
+    mocks.changes = [];
+    await act(async () =>
+      renderer!.update(<FileBrowserPanel {...props} selectedPath="docs/readme.md" />),
+    );
+    expect(model().getItem("docs/readme.md")).toBeNull();
+    expect(model().getItem("docs/")).toBeNull();
+    expect(renderer!.root.findByType(Select).props.value).toBe("changed-files");
+    expect(
+      readFileBrowserGroupPreference(storage, fileBrowserGroupStorageKey("local", "/repo"))
+        ?.recentAreaIds,
+    ).toEqual(["php", "docs"]);
   });
 });
