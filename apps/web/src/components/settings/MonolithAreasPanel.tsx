@@ -163,6 +163,11 @@ function MonolithAreaEditor({
         ...area,
         name: area.name.trim(),
         path: normalizeMonolithAreaPath(area.path)!,
+        ...(area.entrypointPaths
+          ? {
+              entrypointPaths: area.entrypointPaths.map((path) => normalizeMonolithAreaPath(path)!),
+            }
+          : {}),
       })),
       ...(branch ? { defaultBaseBranch: branch } : {}),
     };
@@ -263,6 +268,36 @@ function MonolithAreaEditor({
                 </Select>
               </div>
             </div>
+            {area.kind === "php" ? (
+              <label className="block space-y-1 text-xs">
+                <span>Fallback entry folders</span>
+                <Input
+                  size="sm"
+                  font="mono"
+                  disabled={disabled}
+                  aria-label={`Area ${index + 1} entry folders`}
+                  value={area.entrypointPaths?.join(", ") ?? ""}
+                  placeholder="src/Controller, src/Command"
+                  onChange={(event) => {
+                    const text = event.currentTarget.value;
+                    setSaved(false);
+                    setAreas((current) =>
+                      current.map((entry) => {
+                        if (entry.id !== area.id) return entry;
+                        const { entrypointPaths: _previous, ...rest } = entry;
+                        return text.trim()
+                          ? { ...rest, entrypointPaths: text.split(",").map((path) => path.trim()) }
+                          : rest;
+                      }),
+                    );
+                  }}
+                />
+                <p className="text-muted-foreground">
+                  Comma-separated folders relative to this area. Blank uses Controller and Command
+                  defaults. A graph policy's entry scopes take precedence.
+                </p>
+              </label>
+            ) : null}
           </div>
         ))}
       </div>

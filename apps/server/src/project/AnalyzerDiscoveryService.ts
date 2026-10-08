@@ -22,6 +22,8 @@ export type DiscoveredAnalyzer = {
   readonly configPath?: string;
   readonly scripts: ReadonlyArray<AnalyzerScript>;
   readonly symfonyWiring: boolean;
+  readonly doctrineQueryBudget?: { readonly autoloadPath: string; readonly available: boolean };
+  readonly architectureGraph?: { readonly autoloadPath: string; readonly available: boolean };
   readonly symfonyWiringReference?: {
     readonly generatorPath: string;
     readonly generatorAvailable: boolean;
@@ -410,6 +412,57 @@ const make = Effect.gen(function* () {
             if (candidate.generatorAvailable) break;
           } else warnings.push({ path: manifestPath, reason: "unsafe_path" });
         }
+        const discoverExtension = Effect.fnUntraced(function* (
+          packageName: string,
+          entryFile: string,
+        ) {
+          const candidates = manifests.filter(
+            (entry) => packageName in dependencies(entry.manifest),
+          );
+          let selected: { readonly autoloadPath: string; readonly available: boolean } | undefined;
+          for (const candidate of candidates.toSorted(
+            (a, b) => Number(b.directory === directory) - Number(a.directory === directory),
+          )) {
+            const vendor = record(candidate.manifest.config)["vendor-dir"];
+            const vendorPath = typeof vendor === "string" ? vendor : "vendor";
+            const autoload = resolveInside(
+              candidate.directory,
+              path.join(vendorPath, "autoload.php"),
+            );
+            const entry = resolveInside(
+              candidate.directory,
+              path.join(vendorPath, packageName, entryFile),
+            );
+            if (!autoload || !entry) {
+              warnings.push({
+                path: relative(path.join(candidate.directory, candidate.filename)),
+                reason: "unsafe_path",
+              });
+              continue;
+            }
+            const value = {
+              autoloadPath: relative(autoload),
+              available: (yield* safeExisting(autoload)) && (yield* safeExisting(entry)),
+            };
+            if (!selected || value.available) selected = value;
+            if (value.available) break;
+          }
+          return selected;
+        });
+        const doctrineQueryBudget =
+          tool === "mago"
+            ? yield* discoverExtension(
+                "byte-kitsune/mago-doctrine-query-budget",
+                "src/QueryBudgetExtension.php",
+              )
+            : undefined;
+        const architectureGraph =
+          tool === "mago"
+            ? yield* discoverExtension(
+                "byte-kitsune/mago-architecture-graph",
+                "src/ArchitectureGraphExtension.php",
+              )
+            : undefined;
         tools.push({
           tool,
           manifestPath,
@@ -419,6 +472,8 @@ const make = Effect.gen(function* () {
           ...(configPath ? { configPath } : {}),
           scripts,
           symfonyWiring,
+          ...(doctrineQueryBudget ? { doctrineQueryBudget } : {}),
+          ...(architectureGraph ? { architectureGraph } : {}),
           ...(symfonyWiringReference ? { symfonyWiringReference } : {}),
         });
         if (tool === "biome") break;

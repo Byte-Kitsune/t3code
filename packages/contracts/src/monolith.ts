@@ -24,6 +24,7 @@ export const MonolithArea = Schema.Struct({
   path: MonolithAreaPath,
   kind: Schema.Literals(["php", "react", "folder"]),
   enabled: Schema.optional(Schema.Boolean),
+  entrypointPaths: Schema.optional(Schema.Array(MonolithAreaPath).check(Schema.isMaxLength(100))),
 });
 export type MonolithArea = typeof MonolithArea.Type;
 
@@ -95,10 +96,62 @@ export const MonolithCheckFileInput = Schema.Struct({
   path: MonolithAreaPath,
 });
 export type MonolithCheckFileInput = typeof MonolithCheckFileInput.Type;
+export const MonolithInsightStatus = Schema.Literals([
+  "complete",
+  "incomplete",
+  "unavailable",
+  "unsupported",
+  "failed",
+]);
+export const MonolithInsightLocation = Schema.Struct({
+  id: Schema.optional(Schema.String),
+  serviceId: Schema.optional(Schema.String),
+  symbol: Schema.String,
+  path: Schema.String,
+  line: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1))),
+  column: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1))),
+});
+export const MonolithQueryMethod = Schema.Struct({
+  ...MonolithInsightLocation.fields,
+  lowerBound: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  upperBound: Schema.NullOr(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
+  unknown: Schema.Array(Schema.String),
+  cycles: Schema.Array(Schema.String),
+});
+export const MonolithQueryBudget = Schema.Struct({
+  status: MonolithInsightStatus,
+  message: Schema.optional(Schema.String),
+  methods: Schema.Array(MonolithQueryMethod),
+});
+export type MonolithQueryBudget = typeof MonolithQueryBudget.Type;
+export const MonolithEntryTarget = Schema.Struct({
+  ...MonolithInsightLocation.fields,
+  directCallers: Schema.Array(MonolithInsightLocation),
+  entries: Schema.Array(
+    Schema.Struct({
+      entry: MonolithInsightLocation,
+      chain: Schema.Array(MonolithInsightLocation),
+      evidence: Schema.Literals(["call", "wiring"]),
+      complete: Schema.Boolean,
+    }),
+  ),
+  unknown: Schema.Array(Schema.String),
+  truncated: Schema.Boolean,
+  cycles: Schema.optional(Schema.Array(Schema.String)),
+});
+export const MonolithEntryChains = Schema.Struct({
+  status: MonolithInsightStatus,
+  message: Schema.optional(Schema.String),
+  targets: Schema.Array(MonolithEntryTarget),
+});
+export type MonolithEntryChains = typeof MonolithEntryChains.Type;
+
 export const MonolithCheckFileResult = Schema.Struct({
   areaId: Schema.NullOr(Schema.String),
   diagnostics: Schema.Array(MonolithAnalyzerDiagnostic),
   runs: Schema.Array(MonolithAnalyzerRun),
+  queryBudget: Schema.optional(MonolithQueryBudget),
+  entryChains: Schema.optional(MonolithEntryChains),
   revision: Schema.String,
 });
 export type MonolithCheckFileResult = typeof MonolithCheckFileResult.Type;
@@ -117,6 +170,12 @@ export const MonolithAnalyzerInstallation = Schema.Struct({
   configPath: Schema.optional(Schema.String),
   scripts: Schema.Array(MonolithAnalyzerScript),
   symfonyWiring: Schema.Boolean,
+  doctrineQueryBudget: Schema.optional(
+    Schema.Struct({ autoloadPath: Schema.String, available: Schema.Boolean }),
+  ),
+  architectureGraph: Schema.optional(
+    Schema.Struct({ autoloadPath: Schema.String, available: Schema.Boolean }),
+  ),
   symfonyWiringReference: Schema.optional(
     Schema.Struct({
       generatorPath: Schema.String,

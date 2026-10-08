@@ -99,6 +99,7 @@ import {
 import SourceFilePreview from "./ReadOnlySourcePreview";
 import { FileAnalyzerAnnotation } from "./FileAnalyzerAnnotation";
 import { FileAnalyzerStatus } from "./FileAnalyzerStatus";
+import { PhpFileInsights } from "./PhpFileInsights";
 import {
   mergeFileAnalyzerAnnotations,
   type FileAnalyzerAnnotationGroup,
@@ -133,7 +134,7 @@ interface FilePreviewPanelProps {
   availableEditors: ReadonlyArray<EditorId>;
   revealLine: number | null;
   revealRequestId: number;
-  onOpenFile: (relativePath: string) => void;
+  onOpenFile: (relativePath: string, line?: number) => void;
   onPendingChange: (relativePath: string, pending: boolean) => void;
   selectedFilePending: boolean;
   workspaceMutationId: string | null;
@@ -1346,7 +1347,16 @@ export default function FilePreviewPanel({
         </div>
       ) : null}
       {fileCheck.supported && !isHostFile && !isMedia && !isPdf && previewPath && file.data ? (
-        <FileAnalyzerStatus check={fileCheck} />
+        <>
+          <FileAnalyzerStatus check={fileCheck} />
+          {/\.php$/i.test(previewPath) ? (
+            <PhpFileInsights
+              key={`${environmentId}:${cwd}:${previewPath}`}
+              check={fileCheck}
+              onOpenFile={onOpenFile}
+            />
+          ) : null}
+        </>
       ) : null}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div

@@ -32,6 +32,43 @@ const area = (kind: "php" | "react" | "folder", path: string): MonolithArea => (
 });
 
 it.layer(layerTest)("AnalyzerDiscoveryService", (it) => {
+  it.effect("discovers query-budget and graph packages from separate nested tools manifests", () =>
+    Effect.gen(function* () {
+      const root = yield* temporaryRoot;
+      const service = yield* AnalyzerDiscoveryService.AnalyzerDiscoveryService;
+      yield* write(root, "artifact/api/composer.json", { require: { php: "^8.2" } });
+      yield* write(root, "artifact/api/tools/mago/composer.json", {
+        require: { "carthage-software/mago": "1.50.0" },
+      });
+      yield* write(root, "artifact/api/tools/insights/composer.json", {
+        require: {
+          "byte-kitsune/mago-doctrine-query-budget": "*",
+          "byte-kitsune/mago-architecture-graph": "*",
+        },
+        config: { "vendor-dir": "dependencies" },
+      });
+      yield* write(root, "artifact/api/tools/mago/vendor/bin/mago", "binary");
+      yield* write(root, "artifact/api/tools/insights/dependencies/autoload.php", "<?php");
+      yield* write(
+        root,
+        "artifact/api/tools/insights/dependencies/byte-kitsune/mago-doctrine-query-budget/src/QueryBudgetExtension.php",
+        "<?php",
+      );
+      const tools = (yield* service.discover({
+        cwd: root,
+        areas: [area("php", "artifact/api")],
+      }))[0]!.tools;
+      expect(tools[0]!.doctrineQueryBudget).toEqual({
+        autoloadPath: "artifact/api/tools/insights/dependencies/autoload.php",
+        available: true,
+      });
+      expect(tools[0]!.architectureGraph).toEqual({
+        autoloadPath: "artifact/api/tools/insights/dependencies/autoload.php",
+        available: false,
+      });
+    }),
+  );
+
   it.effect(
     "finds tools Composer installations, referenced config, aliases and Symfony exporter recipes without running them",
     () =>

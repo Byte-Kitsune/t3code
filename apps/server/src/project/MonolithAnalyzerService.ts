@@ -16,6 +16,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as AnalyzerExecution from "../analyzers/AnalyzerExecution.ts";
+import * as PhpInsightsExecution from "../analyzers/PhpInsightsExecution.ts";
 import * as AnalyzerDiscoveryService from "./AnalyzerDiscoveryService.ts";
 import * as MonolithService from "./MonolithService.ts";
 
@@ -62,6 +63,7 @@ const make = Effect.gen(function* () {
   const monolith = yield* MonolithService.MonolithService;
   const discovery = yield* AnalyzerDiscoveryService.AnalyzerDiscoveryService;
   const execution = yield* AnalyzerExecution.AnalyzerExecution;
+  const phpInsights = yield* PhpInsightsExecution.PhpInsightsExecution;
   // Opening several files must not fan out unbounded project-wide PHP checks.
   const checks = yield* Semaphore.make(2);
   const discover: MonolithAnalyzerService["Service"]["discover"] = Effect.fn(
@@ -139,6 +141,7 @@ const make = Effect.gen(function* () {
     const area = matchMonolithArea({ path: input.path }, snapshot.config.areas);
     const diagnostics: MonolithAnalyzerDiagnostic[] = [];
     const runs: MonolithAnalyzerRun[] = [];
+    let insights: PhpInsightsExecution.PhpInsightsResult | undefined;
     if (area !== null && area.kind !== "folder") {
       const tool = area.kind === "php" ? "mago" : "biome";
       const applicable =
@@ -204,6 +207,84 @@ const make = Effect.gen(function* () {
             });
           }
         }
+        if (tool === "mago") {
+          const insightTools = installations[0]?.tools ?? [];
+          const doctrine = insightTools.find(
+            (candidate) => candidate.doctrineQueryBudget?.available,
+          )?.doctrineQueryBudget;
+          const architecture = insightTools.find(
+            (candidate) => candidate.architectureGraph?.available,
+          )?.architectureGraph;
+          const reference = insightTools.find(
+            (candidate) => candidate.symfonyWiringReference?.referenceAvailable,
+          )?.symfonyWiringReference;
+          if (!installation?.available || (!doctrine?.available && !architecture?.available)) {
+            insights = {
+              queryBudget: {
+                status: "unavailable",
+                message: "Install Mago and the Doctrine query-budget extension in this area.",
+                methods: [],
+              },
+              entryChains: {
+                status: "unavailable",
+                message: "Install Mago and the architecture graph extension in this area.",
+                targets: [],
+              },
+            };
+          } else {
+            const autoloadPaths = [
+              ...new Set(
+                [
+                  doctrine?.autoloadPath,
+                  architecture?.autoloadPath,
+                  reference?.autoloadAvailable ? reference.autoloadPath : undefined,
+                ].filter((value): value is string => value !== undefined),
+              ),
+            ].map((file) => path.resolve(root, file));
+            const configPath =
+              installation.scripts.find(
+                (script) => script.operation === "analyze" && script.configPath !== undefined,
+              )?.configPath ?? installation.configPath;
+            const analyzed = yield* phpInsights
+              .run({
+                command: path.resolve(root, installation.binaryPath),
+                cwd: path.resolve(root, installation.workingDirectory),
+                workspaceRoot: root,
+                areaPath: area.path,
+                filePath: file,
+                relativePath: input.path,
+                autoloadPaths,
+                ...(configPath ? { configPath: path.resolve(root, configPath) } : {}),
+                ...(reference?.referenceAvailable
+                  ? { referencePath: path.resolve(root, reference.referencePath) }
+                  : {}),
+                ...(snapshot.config.areas.find((candidate) => candidate.id === area.id)
+                  ?.entrypointPaths
+                  ? {
+                      entrypointPaths: snapshot.config.areas.find(
+                        (candidate) => candidate.id === area.id,
+                      )!.entrypointPaths!,
+                    }
+                  : {}),
+              })
+              .pipe(Effect.result);
+            insights =
+              analyzed._tag === "Success"
+                ? analyzed.success
+                : {
+                    queryBudget: {
+                      status: "failed",
+                      message: analyzed.failure.message,
+                      methods: [],
+                    },
+                    entryChains: {
+                      status: "failed",
+                      message: analyzed.failure.message,
+                      targets: [],
+                    },
+                  };
+          }
+        }
       }
     }
     if ((yield* revision(yield* readFile)) !== fingerprint) {
@@ -220,7 +301,7 @@ const make = Effect.gen(function* () {
         })),
       };
     }
-    return { areaId: area?.id ?? null, revision: fingerprint, diagnostics, runs };
+    return { areaId: area?.id ?? null, revision: fingerprint, diagnostics, runs, ...insights };
   });
   return MonolithAnalyzerService.of({
     discover,

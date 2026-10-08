@@ -2,6 +2,7 @@ import * as SymfonyReferenceService from "./project/SymfonyReferenceService.ts";
 import * as MonolithAnalyzerService from "./project/MonolithAnalyzerService.ts";
 import * as AnalyzerDiscoveryService from "./project/AnalyzerDiscoveryService.ts";
 import * as AnalyzerExecution from "./analyzers/AnalyzerExecution.ts";
+import * as PhpInsightsExecution from "./analyzers/PhpInsightsExecution.ts";
 import * as MonolithService from "./project/MonolithService.ts";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Clock from "effect/Clock";
@@ -423,6 +424,7 @@ const layerWorkspace = Layer.mergeAll(
     Layer.provide(MonolithService.layer),
     Layer.provide(AnalyzerDiscoveryService.layer),
     Layer.provide(AnalyzerExecution.layer.pipe(Layer.provide(ProcessRunner.layer))),
+    Layer.provide(PhpInsightsExecution.layer.pipe(Layer.provide(ProcessRunner.layer))),
   ),
   WorkspacePaths.layer,
   layerWorkspaceEntries,

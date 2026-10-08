@@ -279,4 +279,20 @@ The project settings show detected tools and configuration paths. If the Symfony
 and application autoloader are installed, **Generate container reference** refreshes the dev-container
 reference. The Symfony application must be able to boot in that environment. This action writes the
 reference file and may warm Symfony's dev cache; file-open checks only read the current reference.
-Area-based AI review is a planned addition.
+Saved PHP files also show static Doctrine query budgets per method and entry files with their
+call chains. Install `byte-kitsune/mago-doctrine-query-budget` **0.1.0-beta.12** or newer and
+`byte-kitsune/mago-architecture-graph` **0.1.0-beta.16** or newer in the application's Composer
+project or its tools installation. Earlier versions are reported as unsupported. These inspections
+use the extensions' public APIs over the configured Mago source set, including unchanged callers.
+The Mago workspace must match the PHP area's root; a different configured workspace produces an
+explicit failure instead of inspecting or linking the wrong source tree.
+Query ranges describe one invocation; unresolved calls and recursion remain visible as unknown
+bounds. An injected service alone does not prove a method call.
+
+In **Monolith areas**, configure PHP **Entry folders** relative to that area, for example
+`app/Http, src/Command`. They are shared as `entrypointPaths` in `t3.monolith.json`; the defaults are
+`src/Controller` and `src/Command`. An existing `.mago/architecture-policy.json` with an enabled
+scope graph takes precedence, including its source-root and exclusion filters. Chains include source links and one shortest path per configured
+entry and target method/service variant. Missing references and incomplete graphs are shown
+explicitly, including recursive call paths; no chain found does not establish that a class is unused. Generate the container
+reference explicitly when Symfony service bindings change. Area-based AI review is a planned addition.

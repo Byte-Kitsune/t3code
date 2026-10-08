@@ -58,6 +58,10 @@ export function validateMonolithAreas(areas: readonly MonolithArea[]): string | 
     if (path === null)
       return "Use a project-relative folder path, such as apps/web or . for the root.";
     if (paths.has(path)) return "Each folder can have one area.";
+    if (area.entrypointPaths?.some((entry) => normalizeMonolithAreaPath(entry) === null))
+      return "Entry folders must be relative to the PHP area, such as src/Controller.";
+    if ((area.entrypointPaths?.length ?? 0) > 100)
+      return "An area can contain up to 100 entry folders.";
     paths.add(path);
   }
   return null;

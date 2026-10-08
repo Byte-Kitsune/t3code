@@ -14,6 +14,18 @@ const phpRoot: MonolithArea = { id: "php-root", name: "PHP", path: ".", kind: "p
 const config: MonolithConfig = { version: 1, initialized: true, areas: [phpRoot] };
 
 describe("Monolith area editing", () => {
+  it("validates PHP entry folders relative to the area and preserves them through draft refresh", () => {
+    const area = { ...phpRoot, entrypointPaths: ["src/Controller", "src/Jobs"] };
+    expect(validateMonolithAreas([area])).toBeNull();
+    expect(validateMonolithAreas([{ ...area, entrypointPaths: ["../other"] }])).not.toBeNull();
+    expect(validateMonolithAreas([{ ...area, entrypointPaths: [""] }])).not.toBeNull();
+    const draft = createMonolithAreaDraft({ ...config, areas: [area] });
+    expect(draft.areas[0]?.entrypointPaths).toEqual(area.entrypointPaths);
+    expect(
+      reconcileMonolithAreaDraft(draft, { ...config, areas: [{ ...area, name: "Updated" }] })
+        .areas[0]?.entrypointPaths,
+    ).toEqual(area.entrypointPaths);
+  });
   it("normalizes nested relative folders and rejects paths outside the project", () => {
     expect(normalizeMonolithAreaPath(" ./apps//web/ ")).toBe("apps/web");
     expect(normalizeMonolithAreaPath(".\\artifacts\\reports")).toBe("artifacts/reports");

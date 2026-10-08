@@ -5,6 +5,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as AnalyzerExecution from "../analyzers/AnalyzerExecution.ts";
+import * as PhpInsightsExecution from "../analyzers/PhpInsightsExecution.ts";
 import * as AnalyzerDiscoveryService from "./AnalyzerDiscoveryService.ts";
 import * as MonolithService from "./MonolithService.ts";
 import * as MonolithAnalyzerService from "./MonolithAnalyzerService.ts";
@@ -24,8 +25,20 @@ const setup = Effect.gen(function* () {
   yield* write(root, "app/src/Test.php", "<?php\nfunction test(): void {}\n");
   return root;
 });
-function serviceLayer(run: AnalyzerExecution.AnalyzerExecution["Service"]["run"]) {
+function serviceLayer(
+  run: AnalyzerExecution.AnalyzerExecution["Service"]["run"],
+  insights: PhpInsightsExecution.PhpInsightsExecution["Service"]["run"] = () =>
+    Effect.die("Unexpected insight process"),
+) {
   return Layer.fresh(MonolithAnalyzerService.layer).pipe(
+    Layer.provide(
+      Layer.succeed(
+        PhpInsightsExecution.PhpInsightsExecution,
+        PhpInsightsExecution.PhpInsightsExecution.of({
+          run: insights,
+        }),
+      ),
+    ),
     Layer.provide(MonolithService.layer),
     Layer.provide(AnalyzerDiscoveryService.layer),
     Layer.provide(
@@ -189,4 +202,113 @@ it.effect("drops results when the persisted file changes while checks run", () =
     expect(result.diagnostics).toEqual([]);
     expect(result.runs.every((run) => run.status === "failed")).toBe(true);
   }).pipe(Effect.scoped, Effect.provide(serviceLayer(passed))),
+);
+
+const insightSetup = Effect.gen(function* () {
+  const root = yield* setup;
+  yield* write(root, "app/vendor/autoload.php", "<?php");
+  yield* write(
+    root,
+    "app/vendor/byte-kitsune/mago-doctrine-query-budget/src/QueryBudgetExtension.php",
+    "<?php",
+  );
+  yield* write(
+    root,
+    "app/composer.json",
+    '{"require-dev":{"carthage-software/mago":"*","byte-kitsune/mago-doctrine-query-budget":"*"}}',
+  );
+  yield* write(
+    root,
+    "t3.monolith.json",
+    JSON.stringify({
+      version: 1,
+      initialized: true,
+      areas: [
+        { id: "backend", name: "Backend", path: "app", kind: "php", entrypointPaths: ["src/Jobs"] },
+      ],
+    }),
+  );
+  return root;
+});
+it.effect("returns independent PHP insights with configured entry folders and local tooling", () =>
+  Effect.gen(function* () {
+    const root = yield* insightSetup;
+    const calls: PhpInsightsExecution.PhpInsightsInput[] = [];
+    const result = yield* Effect.flatMap(
+      MonolithAnalyzerService.MonolithAnalyzerService,
+      (service) => service.checkFile({ cwd: root, path: "app/src/Test.php" }),
+    ).pipe(
+      Effect.provide(
+        serviceLayer(passed, (input) => {
+          calls.push(input);
+          return Effect.succeed({
+            queryBudget: {
+              status: "complete",
+              methods: [
+                {
+                  symbol: "Test::load",
+                  path: input.relativePath,
+                  line: 2,
+                  lowerBound: 2,
+                  upperBound: 5,
+                  unknown: [],
+                  cycles: [],
+                },
+              ],
+            },
+            entryChains: { status: "unavailable", targets: [] },
+          });
+        }),
+      ),
+    );
+    expect(calls[0]?.entrypointPaths).toEqual(["src/Jobs"]);
+    expect(calls[0]?.autoloadPaths).toEqual([`${root}/app/vendor/autoload.php`]);
+    expect(result.queryBudget?.methods[0]?.upperBound).toBe(5);
+    expect(result.runs).toHaveLength(3);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+it.effect(
+  "an insight failure still returns ordinary checks and explicitly failed insight status",
+  () =>
+    Effect.gen(function* () {
+      const root = yield* insightSetup;
+      const result = yield* Effect.flatMap(
+        MonolithAnalyzerService.MonolithAnalyzerService,
+        (service) => service.checkFile({ cwd: root, path: "app/src/Test.php" }),
+      ).pipe(
+        Effect.provide(
+          serviceLayer(passed, () =>
+            Effect.fail(new PhpInsightsExecution.PhpInsightsExecutionError({ stage: "process" })),
+          ),
+        ),
+      );
+      expect(result.queryBudget?.status).toBe("failed");
+      expect(result.entryChains?.status).toBe("failed");
+      expect(result.runs.every((run) => run.status === "passed")).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+it.effect("discards insights when the opened source changes during a successful insight run", () =>
+  Effect.gen(function* () {
+    const root = yield* insightSetup;
+    const result = yield* Effect.flatMap(
+      MonolithAnalyzerService.MonolithAnalyzerService,
+      (service) => service.checkFile({ cwd: root, path: "app/src/Test.php" }),
+    ).pipe(
+      Effect.provide(
+        serviceLayer(passed, () =>
+          write(root, "app/src/Test.php", "<?php changed();").pipe(
+            Effect.orDie,
+            Effect.as({
+              queryBudget: { status: "complete" as const, methods: [] },
+              entryChains: { status: "complete" as const, targets: [] },
+            }),
+            Effect.provide(NodeServices.layer),
+          ),
+        ),
+      ),
+    );
+    expect(result.queryBudget).toBeUndefined();
+    expect(result.entryChains).toBeUndefined();
+    expect(result.runs.every((run) => run.status === "failed")).toBe(true);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

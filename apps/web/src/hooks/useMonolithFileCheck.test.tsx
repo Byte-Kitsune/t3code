@@ -107,6 +107,50 @@ afterEach(() => {
 });
 
 describe("automatic saved-file checks", () => {
+  it("hides query budgets and entry chains immediately when the saved revision changes", async () => {
+    await mount();
+    const response = success(base.contents);
+    await act(async () =>
+      pending[0]?.({
+        ...response,
+        value: {
+          ...response.value,
+          queryBudget: {
+            status: "complete",
+            methods: [
+              {
+                symbol: "App::load",
+                path: base.path,
+                line: 2,
+                lowerBound: 2,
+                upperBound: 5,
+                unknown: [],
+                cycles: [],
+              },
+            ],
+          },
+          entryChains: {
+            status: "incomplete",
+            targets: [
+              {
+                symbol: "App::load",
+                path: base.path,
+                directCallers: [],
+                entries: [],
+                unknown: ["dynamic caller"],
+                truncated: false,
+              },
+            ],
+          },
+        },
+      }),
+    );
+    expect(latest?.result?.queryBudget?.methods[0]?.upperBound).toBe(5);
+    expect(latest?.result?.entryChains?.status).toBe("incomplete");
+    await update({ ...base, contents: "<?php\nchanged();" });
+    expect(latest?.result).toBeNull();
+    expect(latest?.status).toBe("checking");
+  });
   it("waits for saved contents and hides findings as soon as the user edits", async () => {
     await mount({ ...base, persisted: false });
     expect(doubles.check).not.toHaveBeenCalled();
