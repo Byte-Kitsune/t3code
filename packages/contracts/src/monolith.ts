@@ -379,10 +379,11 @@ export class MonolithAnalyzerRequestError extends Schema.TaggedError<MonolithAna
     operation: Schema.Literals(["discover", "check", "references"]),
     cwd: Schema.String,
     cause: Schema.Defect(),
+    detail: Schema.optional(Schema.String),
   },
 ) {
   override get message(): string {
-    return `Failed to ${this.operation} monolith analyzers.`;
+    return this.detail ?? `Failed to ${this.operation} monolith analyzers.`;
   }
 }
 

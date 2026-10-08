@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { AuthFilesystemReadScope, type EnvironmentId, type ProjectId } from "@t3tools/contracts";
 import { WrenchIcon } from "lucide-react";
@@ -71,13 +72,16 @@ export function MonolithAnalyzersPanel({
     setOperation({ key, areaId, pending: true, message: "Generating container reference…" });
     const result = await generate({ environmentId, input: { cwd, areaId } });
     if (destinationRef.current !== key) return;
+    const failure = result._tag === "Failure" ? squashAtomCommandFailure(result) : null;
     setOperation({
       key,
       areaId,
       pending: false,
       message:
         result._tag === "Failure"
-          ? "Container reference generation failed. Check the generator and project dependencies."
+          ? failure instanceof Error
+            ? failure.message
+            : "Container reference generation failed. No error details were returned."
           : `Container reference generated: ${result.value.path}`,
     });
   }
@@ -206,7 +210,7 @@ export function MonolithAnalyzersPanel({
               </p>
             ))}
             {currentOperation?.areaId === area.areaId ? (
-              <p role="status" className="break-all text-muted-foreground">
+              <p role="status" className="whitespace-pre-wrap break-all text-muted-foreground">
                 {currentOperation.message}
               </p>
             ) : null}

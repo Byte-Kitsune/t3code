@@ -2650,6 +2650,7 @@ const layerWsRpc = (
               (cause) =>
                 new MonolithAnalyzerRequestError({
                   operation: "references",
+                  detail: cause.message,
                   cwd: input.cwd,
                   cause,
                 }),

@@ -50,7 +50,9 @@ Key boundaries: [area contracts](packages/contracts/src/monolith.ts),
 PHP discovery supports Mago installed through the area's Composer project or a
 `tools` Composer project. Supported `format`, `analyze`, and `guard` scripts supply
 command/configuration metadata. Checks run without writing fixes. Symfony wiring
-reference generation is available from project settings.
+reference generation is available from project settings. Failures report the failed
+step, process exit code or runtime limit, and a bounded stderr excerpt. Container
+JSON is never included in error details.
 
 React areas support Biome, ESLint, and dependency-cruiser, including installed
 workspace binaries. Discovery extracts supported analyzer commands from package

@@ -12,6 +12,21 @@ import * as AnalyzerDiscoveryService from "./AnalyzerDiscoveryService.ts";
 import * as MonolithService from "./MonolithService.ts";
 
 const isDockerError = Schema.is(MagoDockerExecution.MagoDockerError);
+const isProcessError = Schema.is(ProcessRunner.ProcessRunError);
+const processFailureDetail = (cause: unknown): string => {
+  if (isProcessError(cause)) return cause.message;
+  if (isDockerError(cause))
+    return [cause.message, processFailureDetail(cause.cause)].filter(Boolean).join(" ");
+  return "";
+};
+
+// Never include container JSON: it can contain resolved service arguments and secrets.
+const stderrDetail = (stderr: string): string =>
+  stderr
+    // eslint-disable-next-line no-control-regex -- Strip terminal ANSI color codes.
+    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
+    .trim()
+    .slice(-4_000);
 
 export class SymfonyReferenceError extends Schema.TaggedError<SymfonyReferenceError>()(
   "SymfonyReferenceError",
@@ -19,11 +34,12 @@ export class SymfonyReferenceError extends Schema.TaggedError<SymfonyReferenceEr
     areaId: Schema.String,
     stage: Schema.Literals(["discover", "prerequisites", "types", "services", "export", "write"]),
     cause: Schema.optional(Schema.Defect()),
+    detail: Schema.optional(Schema.String),
   },
 ) {
   override get message(): string {
-    const detail = isDockerError(this.cause) ? ` ${this.cause.message}` : "";
-    return `Could not generate the Symfony container reference (${this.stage}).${detail}`;
+    const detail = this.detail ?? processFailureDetail(this.cause);
+    return `Could not generate the Symfony container reference (${this.stage}).${detail ? ` ${detail}` : ""}`;
   }
 }
 
@@ -79,7 +95,13 @@ const make = Effect.gen(function* () {
           (tool.symfonyWiringReference.generatorAvailable &&
             tool.symfonyWiringReference.autoloadAvailable)),
     )?.symfonyWiringReference;
-    if (!reference) return yield* new SymfonyReferenceError({ areaId, stage: "prerequisites" });
+    if (!reference)
+      return yield* new SymfonyReferenceError({
+        areaId,
+        stage: "prerequisites",
+        detail:
+          "No installed Symfony wiring generator and application autoloader were found for this PHP area.",
+      });
     const safePath = Effect.fnUntraced(function* (relative: string, allowMissing = false) {
       const target = paths.resolve(root, relative);
       const fromRoot = paths.relative(root, target);
@@ -163,9 +185,36 @@ const make = Effect.gen(function* () {
         output.stdoutInvalidUtf8 ||
         output.stderrInvalidUtf8
       )
-        return yield* new SymfonyReferenceError({ areaId, stage });
+        return yield* new SymfonyReferenceError({
+          areaId,
+          stage,
+          detail: [
+            output.timedOut
+              ? "PHP command timed out."
+              : output.stdoutTruncated || output.stderrTruncated
+                ? "PHP command exceeded its output limit."
+                : output.stdoutInvalidUtf8 || output.stderrInvalidUtf8
+                  ? "PHP command returned invalid UTF-8."
+                  : `PHP command exited with code ${output.code}.`,
+            stderrDetail(output.stderr),
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        });
       yield* jsonObject(output.stdout).pipe(
-        Effect.mapError((cause) => new SymfonyReferenceError({ areaId, stage, cause })),
+        Effect.mapError(
+          () =>
+            new SymfonyReferenceError({
+              areaId,
+              stage,
+              detail: [
+                "PHP command did not return a valid JSON object. Check for PHP warnings or extra output on stdout.",
+                stderrDetail(output.stderr),
+              ]
+                .filter(Boolean)
+                .join("\n"),
+            }),
+        ),
       );
       return output.stdout;
     });

@@ -1,4 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { MonolithAnalyzerRequestError } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -10,6 +12,11 @@ import * as MagoDockerExecution from "../analyzers/MagoDockerExecution.ts";
 import * as AnalyzerDiscoveryService from "./AnalyzerDiscoveryService.ts";
 import * as MonolithService from "./MonolithService.ts";
 import * as SymfonyReferenceService from "./SymfonyReferenceService.ts";
+
+const encodeRequestError = Schema.encodeEffect(Schema.fromJsonString(MonolithAnalyzerRequestError));
+const decodeRequestError = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(MonolithAnalyzerRequestError),
+);
 
 const base = Layer.mergeAll(MonolithService.layer, AnalyzerDiscoveryService.layer).pipe(
   Layer.provideMerge(NodeServices.layer),
@@ -45,16 +52,22 @@ const fixture = Effect.gen(function* () {
 const runWith = (
   cwd: string,
   calls: Array<ProcessRunner.ProcessRunInput>,
-  outputs: ReadonlyArray<{ stdout: string; code?: number }>,
+  outputs: ReadonlyArray<{
+    stdout: string;
+    stderr?: string;
+    code?: number;
+    failure?: ProcessRunner.ProcessTimeoutError | ProcessRunner.ProcessOutputLimitError;
+  }>,
   docker?: MagoDockerExecution.MagoDockerExecution["Service"],
 ) => {
   const runner = ProcessRunner.ProcessRunner.of({
     run: (input) => {
       const output = outputs[calls.length] ?? { stdout: "{}" };
       calls.push(input);
+      if (output.failure) return Effect.fail(output.failure);
       return Effect.succeed({
         stdout: output.stdout,
-        stderr: "",
+        stderr: output.stderr ?? "",
         code: ChildProcessSpawner.ExitCode(output.code ?? 0),
         timedOut: false,
         stdoutTruncated: false,
@@ -278,10 +291,28 @@ it.layer(base)("SymfonyReferenceService", (it) => {
       const fs = yield* FileSystem.FileSystem;
       const paths = yield* Path.Path;
       const calls: Array<ProcessRunner.ProcessRunInput> = [];
-      const error = yield* runWith(root, calls, [{ stdout: "{}" }, { stdout: "{}", code: 1 }]).pipe(
-        Effect.flip,
-      );
+      const error = yield* runWith(root, calls, [
+        { stdout: "{}" },
+        {
+          stdout: "private container JSON",
+          stderr: "\u001b[31mMissing application environment variable.\u001b[0m",
+          code: 1,
+        },
+      ]).pipe(Effect.flip);
       expect(error.stage).toBe("services");
+      expect(error.message).toContain("exited with code 1");
+      expect(error.message).toContain("Missing application environment variable.");
+      expect(error.message).not.toContain("\u001b");
+      expect(error.message).not.toContain("private container JSON");
+      const wireError = new MonolithAnalyzerRequestError({
+        operation: "references",
+        cwd: root,
+        cause: error,
+        detail: error.message,
+      });
+      const encoded = yield* encodeRequestError(wireError);
+      const decoded = yield* decodeRequestError(encoded);
+      expect(decoded.message).toBe(error.message);
       expect(calls).toHaveLength(2);
       expect(
         yield* fs.readFileString(paths.join(root, "api/.mago/container-reference.dev.json")),
@@ -301,8 +332,41 @@ it.layer(base)("SymfonyReferenceService", (it) => {
         { stdout: "PHP warning: unexpected output" },
       ]).pipe(Effect.flip);
       expect(error.stage).toBe("export");
+      expect(error.message).toContain("did not return a valid JSON object");
+      expect(error.message).not.toContain("PHP warning: unexpected output");
       expect(
         yield* fs.readFileString(paths.join(root, "api/.mago/container-reference.dev.json")),
+      ).toBe('{"previous":true}');
+    }),
+  );
+
+  it.effect.each([
+    new ProcessRunner.ProcessTimeoutError({
+      command: "php",
+      argumentCount: 1,
+      cwd: "/app",
+      timeoutMs: 60_000,
+    }),
+    new ProcessRunner.ProcessOutputLimitError({
+      command: "php",
+      argumentCount: 1,
+      cwd: "/app",
+      stream: "stdout",
+      maxBytes: 4_000_000,
+      observedBytes: 4_000_001,
+    }),
+  ])("reports $._tag without replacing the existing reference", (failure) =>
+    Effect.gen(function* () {
+      const root = yield* fixture;
+      const calls: Array<ProcessRunner.ProcessRunInput> = [];
+      const error = yield* runWith(root, calls, [{ stdout: "", failure }]).pipe(Effect.flip);
+      expect(error.stage).toBe("types");
+      expect(error.message).toContain(failure.message);
+      expect(calls).toHaveLength(1);
+      expect(
+        yield* (yield* FileSystem.FileSystem).readFileString(
+          `${root}/api/.mago/container-reference.dev.json`,
+        ),
       ).toBe('{"previous":true}');
     }),
   );
