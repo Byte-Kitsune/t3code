@@ -25,6 +25,13 @@ import { normalizePhpSecurityInsights, type PhpSecurityInsights } from "./PhpSec
 import { PHP_INSIGHTS_WORKER_SOURCE } from "./PhpInsightsWorkerSource.ts";
 
 const isDockerError = Schema.is(MagoDockerExecution.MagoDockerError);
+const isProcessError = Schema.is(ProcessRunner.ProcessRunError);
+const processFailureDetail = (cause: unknown): string => {
+  if (isProcessError(cause)) return cause.message;
+  if (isDockerError(cause))
+    return [cause.message, processFailureDetail(cause.cause)].filter(Boolean).join(" ");
+  return "";
+};
 
 export interface PhpInsightsInput {
   readonly command: string;
@@ -65,10 +72,13 @@ export class PhpInsightsExecutionError extends Schema.TaggedError<PhpInsightsExe
   },
 ) {
   override get message(): string {
-    if (isDockerError(this.cause)) return this.cause.message;
+    const detail =
+      this.detail ??
+      (isInsightError(this.cause) ? this.cause.detail : undefined) ??
+      processFailureDetail(this.cause);
     if (this.stage === "workspace")
       return "PHP insights require the Mago workspace to match the PHP area's root. Adjust the area or its Mago workspace to refresh insights.";
-    return `PHP file insights could not complete (${this.stage}).${this.detail ? ` ${this.detail}` : ""}`;
+    return `PHP file insights could not complete (${this.stage}).${detail ? ` ${detail}` : ""}`;
   }
 }
 export class PhpInsightsExecution extends Context.Service<
@@ -575,7 +585,10 @@ const make = Effect.gen(function* () {
             checked.stdoutTruncated ||
             checked.stderrTruncated
           )
-            return yield* new PhpInsightsExecutionError({ stage: "process" });
+            return yield* new PhpInsightsExecutionError({
+              stage: "process",
+              detail: analyzerFailureDetails(checked),
+            });
         } else {
           yield* process(
             [
@@ -594,7 +607,9 @@ const make = Effect.gen(function* () {
             { ...globalThis.process.env, NO_COLOR: "1", T3_PHP_INSIGHTS_INPUT: inputPath },
           ).pipe(
             Effect.mapError((cause) => {
-              const error = new PhpInsightsExecutionError({ stage: "process", cause });
+              const error = isInsightError(cause)
+                ? cause
+                : new PhpInsightsExecutionError({ stage: "process", cause });
               if (snapshotKey !== undefined) {
                 failedSnapshots.delete(snapshotKey);
                 failedSnapshots.set(snapshotKey, error);

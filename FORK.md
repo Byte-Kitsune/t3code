@@ -62,6 +62,8 @@ or file check does not serialize unrelated areas. Background indexing retains
 its global two-job budget and yields to opened-file requests in the same area.
 Batch status includes the current analyzer phase; opened-file failures expose
 the server's diagnostic message instead of only changing the status label.
+PHP insights preserve nested native exit/timeout details and Docker process
+limits, including cached failed snapshot attempts.
 
 React areas support Biome, ESLint, and dependency-cruiser, including installed
 workspace binaries. Discovery extracts supported analyzer commands from package

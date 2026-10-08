@@ -76,6 +76,24 @@ it.effect("identifies a failed Mago config command without exposing its output",
     expect(failure.message).not.toContain("do-not-display");
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+it("preserves a process output limit wrapped by Docker", () => {
+  const failure = new PhpInsightsExecution.PhpInsightsExecutionError({
+    stage: "process",
+    cause: new MagoDockerExecution.MagoDockerError({
+      stage: "process",
+      cause: new ProcessRunner.ProcessOutputLimitError({
+        command: "docker",
+        argumentCount: 3,
+        stream: "stdout",
+        maxBytes: 4_000_000,
+        observedBytes: 4_030_464,
+      }),
+    }),
+  });
+  expect(failure.message).toContain("stdout produced 4030464 bytes");
+  expect(failure.message).toContain("4000000 byte limit");
+});
+
 function mockRunner(
   options: {
     malformedQuery?: boolean;
@@ -880,7 +898,11 @@ it.effect("reuses a failed native snapshot attempt until the indexing cycle chan
           })
           .pipe(Effect.result);
         expect(result._tag).toBe("Failure");
-        if (result._tag === "Failure") expect(result.failure.stage).toBe("process");
+        if (result._tag === "Failure") {
+          expect(result.failure.stage).toBe("process");
+          expect(result.failure.message).toContain("Exit code 2");
+          expect(result.failure.message).toContain("exceeded its time limit");
+        }
       }
     }).pipe(Effect.provide(runLayer(run)));
     expect(attempts).toBe(2);
