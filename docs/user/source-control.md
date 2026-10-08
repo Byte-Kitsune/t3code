@@ -272,7 +272,9 @@ Invalid existing configuration is reported instead of replaced.
 The optional default base branch supplies the local Changes comparison target until you choose
 another branch. A hosted pull request keeps its own target branch. Opening a saved PHP or React source file runs the locally installed analyzer and shows findings at
 source lines. PHP uses Mago format checks, analysis, and guard; React uses Biome checks. No formatting
-changes are applied. Missing tools and failed checks are shown separately from passing checks.
+changes are applied. Errors and warnings stay visible inline; informational help opens from a compact
+icon. Expand **File checks** below the source for missing tools, setup details and execution status,
+or **PHP insights** for query budgets and entry chains. These details do not crowd the file header.
 Install tools with your project's usual package manager before opening files. Existing analyzer
 configuration is used, including Mago installed in a PHP area's `tools/` Composer project.
 

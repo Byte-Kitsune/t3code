@@ -99,8 +99,8 @@ import {
 } from "./fileSurfaceChrome";
 import SourceFilePreview from "./ReadOnlySourcePreview";
 import { FileAnalyzerAnnotation } from "./FileAnalyzerAnnotation";
-import { FileAnalyzerStatus } from "./FileAnalyzerStatus";
-import { PhpFileInsights } from "./PhpFileInsights";
+import { FileAnalysisFooter } from "./FileAnalysisFooter";
+import { syncFileAnalyzerGutter } from "./fileAnalyzerGutter";
 import { PhpCallGraphDialog, type PhpGraphSelection } from "./PhpCallGraphDialog";
 import { openPhpSourceCallGraph } from "./phpSourceClick";
 import {
@@ -1219,7 +1219,14 @@ export default function FilePreviewPanel({
     isBrowserPreviewFile(previewPath);
   const absolutePath =
     relativePath && attachment === undefined ? resolvePathLinkTarget(relativePath, cwd) : null;
-  const onFilePostRender = useFileLineReveal(relativePath, revealLine, revealRequestId);
+  const onFileRevealPostRender = useFileLineReveal(relativePath, revealLine, revealRequestId);
+  const onFilePostRender = useCallback<FilePostRender>(
+    (container, instance, phase) => {
+      syncFileAnalyzerGutter(container, phase === "unmount" ? [] : fileCheck.diagnostics);
+      onFileRevealPostRender(container, instance, phase);
+    },
+    [fileCheck.diagnostics, onFileRevealPostRender],
+  );
   useWorkspaceMutationRefresh({
     enabled:
       attachment === undefined &&
@@ -1395,24 +1402,6 @@ export default function FilePreviewPanel({
           Preview limited to the first 1 MB of a {file.data.byteLength.toLocaleString()} byte file.
         </div>
       ) : null}
-      {fileCheck.supported && !isHostFile && !isMedia && !isPdf && previewPath && file.data ? (
-        <>
-          <FileAnalyzerStatus check={fileCheck} />
-          {/\.php$/i.test(previewPath) ? (
-            <PhpFileInsights
-              key={`${environmentId}:${cwd}:${previewPath}`}
-              check={fileCheck}
-              onOpenFile={onOpenFile}
-              {...(graphReady
-                ? {
-                    onOpenSymbol: (target) =>
-                      openSourceGraph({ kind: "method", symbol: target.symbol, targets: [target] }),
-                  }
-                : {})}
-            />
-          ) : null}
-        </>
-      ) : null}
       <PhpCallGraphDialog
         incomplete={sourceGraph?.status === "incomplete"}
         selection={
@@ -1552,6 +1541,20 @@ export default function FilePreviewPanel({
                 />
               </DiffWorkerPoolProvider>
             )
+          ) : null}
+          {fileCheck.supported && !isHostFile && !isMedia && !isPdf && previewPath && file.data ? (
+            <FileAnalysisFooter
+              key={`${environmentId}:${cwd}:${previewPath}`}
+              check={fileCheck}
+              php={/\.php$/i.test(previewPath)}
+              onOpenFile={onOpenFile}
+              {...(graphReady
+                ? {
+                    onOpenSymbol: (target) =>
+                      openSourceGraph({ kind: "method", symbol: target.symbol, targets: [target] }),
+                  }
+                : {})}
+            />
           ) : null}
         </div>
         {showExplorer ? (
