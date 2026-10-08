@@ -1,4 +1,8 @@
-import { MONOLITH_CONFIG_FILE_NAME, type MonolithArea } from "@t3tools/contracts";
+import {
+  MONOLITH_CONFIG_FILE_NAME,
+  type MonolithArea,
+  type MonolithAnalyzerDiagnostic,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -12,9 +16,10 @@ export type AnalyzerScript = {
   readonly operation: "format" | "analyze" | "guard" | "lint" | "check" | "references";
   readonly command: string;
   readonly configPath?: string;
+  readonly sourcePaths?: ReadonlyArray<string>;
 };
 export type DiscoveredAnalyzer = {
-  readonly tool: "mago" | "biome";
+  readonly tool: MonolithAnalyzerDiagnostic["tool"];
   readonly manifestPath: string;
   readonly workingDirectory: string;
   readonly binaryPath: string;
@@ -92,6 +97,131 @@ const tokenize = (command: string): ReadonlyArray<string> | undefined => {
     consumed = match.index + match[0].length;
   }
   return command.slice(consumed).trim() === "" ? tokens : undefined;
+};
+
+const analyzerTokenIndex = (tokens: ReadonlyArray<string>, tool: DiscoveredAnalyzer["tool"]) => {
+  const index = tokens.findIndex(
+    (token) =>
+      token.split(/[\\/]/).at(-1) === tool ||
+      (tool === "depcruise" && token.split(/[\\/]/).at(-1) === "dependency-cruiser") ||
+      token === `@${tool}`,
+  );
+  if (index <= 0) return index;
+  return ["npx", "pnpm", "yarn", "npm", "bun", "bunx", "node", "php", "@php"].includes(tokens[0]!)
+    ? index
+    : -1;
+};
+
+// Package quality scripts often chain analyzers with tsc. Extract only a literal,
+// unambiguous analyzer command for metadata; automatic checks still run the binary
+// directly and never execute the package recipe or its other commands.
+const jsRecipeTokens = (
+  command: string,
+  tool: DiscoveredAnalyzer["tool"],
+): ReadonlyArray<string> | undefined => {
+  const parts: Array<string> = [];
+  let quote: string | undefined;
+  let start = 0;
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]!;
+    if (character === "\\") {
+      index++;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === "&" && command[index + 1] === "&") {
+      parts.push(command.slice(start, index));
+      start = index + 2;
+      index++;
+    } else if (/[;&|<>`$\n\r]/.test(character)) return undefined;
+  }
+  if (quote) return undefined;
+  parts.push(command.slice(start));
+  let selected: ReadonlyArray<string> | undefined;
+  for (const part of parts) {
+    const tokens = tokenize(part);
+    if (!tokens) return undefined;
+    if (["cd", "pushd", "popd", "eval", "source", "."].includes(tokens[0] ?? "")) return undefined;
+    if (analyzerTokenIndex(tokens, tool) < 0) continue;
+    if (selected) return undefined;
+    selected = tokens;
+  }
+  return selected;
+};
+
+// Graph exports are presentation recipes, not automatic validation metadata.
+// Only classify an explicit literal output type; never execute its redirection.
+const dependencyVisualizationRecipe = (command: string) => {
+  let quote: string | undefined;
+  let end = command.length;
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]!;
+    if (character === "\\") {
+      index++;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') quote = character;
+    else if (character === ">") {
+      end = index;
+      break;
+    }
+  }
+  if (end < command.length && /[;&|]/.test(command.slice(end + 1))) return false;
+  const tokens = tokenize(command.slice(0, end));
+  if (!tokens || analyzerTokenIndex(tokens, "depcruise") < 0) return false;
+  const flags = tokens.filter(
+    (token) => token === "--output-type" || token === "-T" || token.startsWith("--output-type="),
+  );
+  if (flags.length !== 1) return false;
+  const index = tokens.indexOf(flags[0]!);
+  const token = tokens[index]!;
+  const output = token.startsWith("--output-type=")
+    ? token.slice("--output-type=".length)
+    : tokens[index + 1];
+  return output !== undefined && ["dot", "ddot", "archi", "mermaid", "d2", "html"].includes(output);
+};
+
+const relevantUnsupportedRecipe = (command: string, tool: DiscoveredAnalyzer["tool"]) => {
+  // This classification never becomes executable argv. Require an invocation
+  // and operation, rather than mentions in echo text, config paths or URLs.
+  const toolPattern = tool === "depcruise" ? "(?:depcruise|dependency-cruiser)" : tool;
+  const operationPattern =
+    tool === "mago" || tool === "biome"
+      ? "[^;&|]*\\b(?:format|fmt|analyze|guard|lint|check|ci)\\b"
+      : "";
+  const invocation = new RegExp(
+    `^\\s*(?:(?:npx|pnpm|yarn|npm|bun|bunx|node|php|@php)\\s+(?:(?:exec|dlx|--yes|-y|--)\\s+)*)?["']?(?:[^\\s'"]*[/\\\\])?@?${toolPattern}["']?\\b${operationPattern}`,
+  );
+  let quote: string | undefined;
+  let start = 0;
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]!;
+    if (character === "\\") {
+      index++;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') quote = character;
+    else if (/[;&|]/.test(character)) {
+      if (invocation.test(command.slice(start, index))) return true;
+      start = index + 1;
+    }
+  }
+  return invocation.test(command.slice(start));
 };
 
 const make = Effect.gen(function* () {
@@ -226,10 +356,22 @@ const make = Effect.gen(function* () {
               (entry) => "byte-kitsune/mago-symfony-wiring" in dependencies(entry.manifest),
             )
           : [];
-      for (const { directory, filename, manifest } of manifests) {
-        const tool = area.kind === "php" ? "mago" : "biome";
+      const discoveredTools = new Set<DiscoveredAnalyzer["tool"]>();
+      const candidates = manifests.flatMap((entry) =>
+        (area.kind === "php"
+          ? (["mago"] as const)
+          : (["biome", "eslint", "depcruise"] as const)
+        ).map((tool) => ({ ...entry, tool })),
+      );
+      for (const { directory, filename, manifest, tool } of candidates) {
+        if (tool !== "mago" && discoveredTools.has(tool)) continue;
         const deps = dependencies(manifest);
-        const dependency = tool === "mago" ? "carthage-software/mago" : "@biomejs/biome";
+        const dependency = {
+          mago: "carthage-software/mago",
+          biome: "@biomejs/biome",
+          eslint: "eslint",
+          depcruise: "dependency-cruiser",
+        }[tool];
         if (
           !(dependency in deps) &&
           !(tool === "mago" && area.magoDocker && !hasDeclaredMago && directory === areaRoot)
@@ -262,34 +404,49 @@ const make = Effect.gen(function* () {
           };
           for (const [name, value] of Object.entries(composerScripts)) {
             for (const command of flattenScript(value, new Set([name]))) {
-              const tokens = tokenize(command);
+              if (tool === "depcruise" && dependencyVisualizationRecipe(command)) continue;
+              const tokens =
+                tokenize(command) ?? (tool !== "mago" ? jsRecipeTokens(command, tool) : undefined);
               const reference = /create-container-reference\.php/.test(command);
-              if (reference) {
+              if (reference && tool === "mago") {
                 const script: AnalyzerScript = { name, operation: "references", command };
                 scripts.push(script);
                 scriptDirectories.set(script, scriptDirectory);
                 continue;
               }
               if (!tokens) {
-                if (/\bmago\b|\bbiome\b/.test(command))
+                if (
+                  relevantUnsupportedRecipe(command, tool) &&
+                  !warnings.some(
+                    (warning) =>
+                      warning.path === manifestPath && warning.reason === "unsupported_script",
+                  )
+                )
                   warnings.push({ path: manifestPath, reason: "unsupported_script" });
                 continue;
               }
-              const toolIndex = tokens.findIndex(
-                (token) => path.basename(token) === tool || token === `@${tool}`,
-              );
+              const toolIndex = analyzerTokenIndex(tokens, tool);
               if (toolIndex < 0) continue;
               const operation = tokens
                 .slice(toolIndex + 1)
                 .find((token) =>
                   ["format", "fmt", "analyze", "guard", "lint", "check", "ci"].includes(token),
                 );
-              if (!operation) continue;
+              if (!operation && (tool === "mago" || tool === "biome")) continue;
               const normalized =
-                operation === "fmt" ? "format" : operation === "ci" ? "check" : operation;
-              const configFlag = tool === "mago" ? "--config" : "--config-path";
+                tool === "eslint" || tool === "depcruise"
+                  ? "check"
+                  : operation === "fmt"
+                    ? "format"
+                    : operation === "ci"
+                      ? "check"
+                      : operation;
+              const configFlag = tool === "biome" ? "--config-path" : "--config";
               const flagIndex = tokens.findIndex(
-                (token) => token === configFlag || token.startsWith(`${configFlag}=`),
+                (token) =>
+                  token === configFlag ||
+                  token.startsWith(`${configFlag}=`) ||
+                  ((tool === "eslint" || tool === "depcruise") && token === "-c"),
               );
               const rawConfig =
                 flagIndex < 0
@@ -315,11 +472,43 @@ const make = Effect.gen(function* () {
                   }
                 }
               }
+              const sourcePaths: Array<string> = [];
+              if (tool === "depcruise") {
+                const valueFlags = new Set([
+                  "--config",
+                  "-c",
+                  "--output-type",
+                  "-T",
+                  "--output-to",
+                  "-f",
+                  "--include-only",
+                  "--exclude",
+                  "--do-not-follow",
+                  "--ts-config",
+                  "--webpack-config",
+                  "--babel-config",
+                  "--max-depth",
+                  "--collapse",
+                  "--prefix",
+                ]);
+                for (let index = toolIndex + 1; index < tokens.length; index++) {
+                  const token = tokens[index]!;
+                  if (valueFlags.has(token)) {
+                    index++;
+                    continue;
+                  }
+                  if (token.startsWith("-")) continue;
+                  const target = resolveInside(scriptDirectory, token);
+                  if (!target) warnings.push({ path: manifestPath, reason: "unsafe_path" });
+                  else sourcePaths.push(relative(target));
+                }
+              }
               scripts.push({
                 name,
                 operation: normalized as AnalyzerScript["operation"],
                 command,
                 ...(configPath ? { configPath } : {}),
+                ...(sourcePaths.length ? { sourcePaths } : {}),
               });
             }
           }
@@ -338,7 +527,29 @@ const make = Effect.gen(function* () {
                   "mago.dist.yml",
                   "mago.dist.json",
                 ]
-              : ["biome.json", "biome.jsonc"];
+              : tool === "biome"
+                ? ["biome.json", "biome.jsonc"]
+                : tool === "eslint"
+                  ? [
+                      "eslint.config.js",
+                      "eslint.config.mjs",
+                      "eslint.config.cjs",
+                      "eslint.config.ts",
+                      "eslint.config.mts",
+                      "eslint.config.cts",
+                      ".eslintrc.js",
+                      ".eslintrc.cjs",
+                      ".eslintrc.json",
+                      ".eslintrc.yaml",
+                      ".eslintrc.yml",
+                      ".eslintrc",
+                    ]
+                  : [
+                      ".dependency-cruiser.cjs",
+                      ".dependency-cruiser.js",
+                      ".dependency-cruiser.mjs",
+                      ".dependency-cruiser.json",
+                    ];
           for (const configDirectory of new Set([areaRoot, directory])) {
             for (const name of names) {
               const target = path.join(configDirectory, name);
@@ -367,15 +578,15 @@ const make = Effect.gen(function* () {
                   "mago",
                 ),
               )
-            : path.join(directory, "node_modules", ".bin", "biome");
+            : path.join(directory, "node_modules", ".bin", tool);
         if (!binary) {
           warnings.push({ path: manifestPath, reason: "unsafe_path" });
           continue;
         }
-        if (tool === "biome" && !(yield* safeExisting(binary, true))) {
+        if (tool !== "mago" && !(yield* safeExisting(binary, true))) {
           let ancestor = path.dirname(directory);
           while (withinRoot(ancestor)) {
-            const candidate = path.join(ancestor, "node_modules/.bin/biome");
+            const candidate = path.join(ancestor, "node_modules/.bin", tool);
             if (yield* safeExisting(candidate, true)) {
               binary = candidate;
               break;
@@ -489,7 +700,7 @@ const make = Effect.gen(function* () {
           ...(architectureGraph ? { architectureGraph } : {}),
           ...(symfonyWiringReference ? { symfonyWiringReference } : {}),
         });
-        if (tool === "biome") break;
+        discoveredTools.add(tool);
       }
       results.push({ areaId: area.id, tools, warnings });
     }

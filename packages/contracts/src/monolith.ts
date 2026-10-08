@@ -148,12 +148,12 @@ export class MonolithRequestError extends Schema.TaggedError<MonolithRequestErro
   }
 }
 
-export const MonolithAnalyzerTool = Schema.Literals(["mago", "biome"]);
+export const MonolithAnalyzerTool = Schema.Literals(["mago", "biome", "eslint", "depcruise"]);
 export const MonolithAnalyzerOperation = Schema.Literals(["format", "analyze", "guard", "check"]);
 export const MonolithAnalyzerDiagnostic = Schema.Struct({
   path: Schema.String,
-  line: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
-  column: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  line: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1))),
+  column: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1))),
   endLine: Schema.optional(Schema.Number),
   endColumn: Schema.optional(Schema.Number),
   severity: Schema.Literals(["error", "warning", "info"]),
@@ -331,6 +331,7 @@ export const MonolithAnalyzerScript = Schema.Struct({
   operation: Schema.Literals(["format", "analyze", "guard", "lint", "check", "references"]),
   command: Schema.String,
   configPath: Schema.optional(Schema.String),
+  sourcePaths: Schema.optional(Schema.Array(Schema.String)),
 });
 export const MonolithAnalyzerInstallation = Schema.Struct({
   tool: MonolithAnalyzerTool,

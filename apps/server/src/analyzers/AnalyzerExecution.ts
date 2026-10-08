@@ -11,13 +11,14 @@ import * as ProcessRunner from "../processRunner.ts";
 const isDockerError = Schema.is(MagoDockerExecution.MagoDockerError);
 
 export interface AnalyzerExecutionInput {
-  readonly tool: "mago" | "biome";
+  readonly tool: "mago" | "biome" | "eslint" | "depcruise";
   readonly operation: "format" | "analyze" | "guard" | "check";
   readonly command: string;
   readonly cwd: string;
   readonly workspaceRoot: string;
   readonly filePath: string;
   readonly filePaths?: readonly string[];
+  readonly sourcePaths?: readonly string[];
   readonly configPath?: string;
   readonly sourceText?: string;
   readonly sourceTexts?: Readonly<Record<string, string>>;
@@ -27,14 +28,14 @@ export interface AnalyzerExecutionInput {
 
 export interface AnalyzerDiagnostic {
   readonly path: string;
-  readonly line: number;
-  readonly column: number;
+  readonly line?: number;
+  readonly column?: number;
   readonly endLine?: number;
   readonly endColumn?: number;
   readonly severity: "error" | "warning" | "info";
   readonly message: string;
   readonly ruleId: string;
-  readonly tool: "mago" | "biome";
+  readonly tool: AnalyzerExecutionInput["tool"];
   readonly operation: AnalyzerExecutionInput["operation"];
 }
 
@@ -47,7 +48,7 @@ export interface AnalyzerExecutionResult {
 export class AnalyzerExecutionError extends Schema.TaggedError<AnalyzerExecutionError>()(
   "AnalyzerExecutionError",
   {
-    tool: Schema.Literals(["mago", "biome"]),
+    tool: Schema.Literals(["mago", "biome", "eslint", "depcruise"]),
     operation: Schema.String,
     category: Schema.Literals(["input", "spawn", "timeout", "output", "report", "exit"]),
     cause: Schema.Defect(),
@@ -204,6 +205,76 @@ function normalizeMago(
   return diagnostics;
 }
 
+function normalizeEslint(
+  input: AnalyzerExecutionInput,
+  stdout: string,
+  paths: Path.Path,
+): AnalyzerDiagnostic[] {
+  const report: unknown = JSON.parse(stdout);
+  if (!Array.isArray(report)) throw new Error("ESLint report is not a file array");
+  const diagnostics: AnalyzerDiagnostic[] = [];
+  for (const value of report) {
+    const file = record(value);
+    const diagnosticPath = relativeFile(input, text(file.filePath), paths);
+    if (diagnosticPath === null) continue;
+    if (!Array.isArray(file.messages)) throw new Error("ESLint report has no messages array");
+    for (const value of file.messages) {
+      const issue = record(value);
+      if (issue.severity === 0) continue;
+      if (issue.severity !== 1 && issue.severity !== 2) throw new Error("Invalid ESLint severity");
+      diagnostics.push({
+        path: diagnosticPath,
+        ...(issue.line == null ? {} : { line: integer(issue.line) }),
+        ...(issue.column == null ? {} : { column: integer(issue.column) }),
+        ...(issue.endLine == null ? {} : { endLine: integer(issue.endLine) }),
+        ...(issue.endColumn == null ? {} : { endColumn: integer(issue.endColumn) }),
+        severity: issue.severity === 2 ? "error" : "warning",
+        message: text(issue.message),
+        ruleId: typeof issue.ruleId === "string" ? issue.ruleId : "eslint/configuration",
+        tool: "eslint",
+        operation: "check",
+      });
+    }
+  }
+  return diagnostics;
+}
+
+function normalizeDepcruise(
+  input: AnalyzerExecutionInput,
+  stdout: string,
+  paths: Path.Path,
+): AnalyzerDiagnostic[] {
+  const report = record(JSON.parse(stdout));
+  const summary = record(report.summary);
+  if (!Array.isArray(summary.violations))
+    throw new Error("Dependency-cruiser report has no violations array");
+  const diagnostics: AnalyzerDiagnostic[] = [];
+  for (const value of summary.violations) {
+    const issue = record(value);
+    const rule = record(issue.rule);
+    if (rule.severity === "ignore") continue;
+    const from = text(issue.from);
+    const to = issue.to == null ? undefined : text(issue.to);
+    // Dependency-cruiser reports module relationships, not source positions.
+    // Include inbound as well as outbound violations when either file is opened.
+    const affected = new Set([from, ...(to === undefined ? [] : [to])]);
+    for (const reportedPath of affected) {
+      const diagnosticPath = relativeFile(input, reportedPath, paths);
+      if (diagnosticPath === null) continue;
+      const name = text(rule.name);
+      diagnostics.push({
+        path: diagnosticPath,
+        severity: severity(rule.severity),
+        message: `${name}: ${from}${to === undefined ? "" : ` → ${to}`}`,
+        ruleId: name,
+        tool: "depcruise",
+        operation: "check",
+      });
+    }
+  }
+  return diagnostics;
+}
+
 function normalizeBiome(
   input: AnalyzerExecutionInput,
   stdout: string,
@@ -294,7 +365,7 @@ const make = Effect.gen(function* () {
   const dockerService = yield* Effect.serviceOption(MagoDockerExecution.MagoDockerExecution);
   const run = Effect.fn("AnalyzerExecution.run")(function* (input: AnalyzerExecutionInput) {
     const validPair =
-      input.tool === "biome" ? input.operation === "check" : input.operation !== "check";
+      input.tool === "mago" ? input.operation !== "check" : input.operation === "check";
     if (
       !validPair ||
       (!input.runtime && !paths.isAbsolute(input.command)) ||
@@ -310,6 +381,24 @@ const make = Effect.gen(function* () {
         cause: new Error("Invalid analyzer invocation"),
       });
     }
+    if (
+      input.tool === "depcruise" &&
+      (!input.sourcePaths?.length ||
+        input.sourcePaths.some((source) => {
+          const relative = paths.relative(input.workspaceRoot, source);
+          return (
+            !paths.isAbsolute(source) ||
+            relative === ".." ||
+            relative.startsWith(`..${paths.sep}`) ||
+            paths.isAbsolute(relative)
+          );
+        }))
+    )
+      return yield* new AnalyzerExecutionError({
+        ...input,
+        category: "input",
+        cause: new Error("Invalid dependency-cruiser source scope"),
+      });
     const docker = input.runtime
       ? yield* Effect.gen(function* () {
           if (Option.isNone(dockerService))
@@ -335,29 +424,44 @@ const make = Effect.gen(function* () {
     const toolPath = (hostPath: string) => docker?.toContainer(hostPath) ?? hostPath;
     const args = yield* Effect.try({
       try: () =>
-        input.tool === "biome"
+        input.tool === "eslint"
           ? [
-              "check",
-              "--reporter=json",
-              "--colors=off",
-              "--max-diagnostics=none",
-              ...(input.configPath ? [`--config-path=${input.configPath}`] : []),
+              "--format",
+              "json",
+              "--no-fix",
+              ...(input.configPath ? ["--config", input.configPath] : []),
               ...(input.filePaths ?? [input.filePath]),
             ]
-          : [
-              ...(input.configPath ? ["--config", toolPath(input.configPath)] : []),
-              input.operation,
-              ...(input.operation === "format"
-                ? ["--dry-run", toolPath(input.filePath)]
-                : [
-                    "--reporting-format",
-                    "json",
-                    "--reporting-target",
-                    "stdout",
-                    "--minimum-report-level",
-                    "note",
-                  ]),
-            ],
+          : input.tool === "depcruise"
+            ? [
+                "--output-type",
+                "json",
+                ...(input.configPath ? ["--config", input.configPath] : []),
+                ...input.sourcePaths!,
+              ]
+            : input.tool === "biome"
+              ? [
+                  "check",
+                  "--reporter=json",
+                  "--colors=off",
+                  "--max-diagnostics=none",
+                  ...(input.configPath ? [`--config-path=${input.configPath}`] : []),
+                  ...(input.filePaths ?? [input.filePath]),
+                ]
+              : [
+                  ...(input.configPath ? ["--config", toolPath(input.configPath)] : []),
+                  input.operation,
+                  ...(input.operation === "format"
+                    ? ["--dry-run", toolPath(input.filePath)]
+                    : [
+                        "--reporting-format",
+                        "json",
+                        "--reporting-target",
+                        "stdout",
+                        "--minimum-report-level",
+                        "note",
+                      ]),
+                ],
       catch: (cause) => new AnalyzerExecutionError({ ...input, category: "input", cause }),
     });
     const processError = (cause: { readonly _tag: string }) =>
@@ -378,14 +482,29 @@ const make = Effect.gen(function* () {
             command: input.command,
             args,
             cwd: input.cwd,
-            env: { ...process.env, NO_COLOR: "1" },
+            env: {
+              ...process.env,
+              NO_COLOR: "1",
+              ...(input.tool === "eslint" && input.configPath
+                ? {
+                    ESLINT_USE_FLAT_CONFIG: paths.basename(input.configPath).startsWith(".eslintrc")
+                      ? "false"
+                      : "true",
+                  }
+                : {}),
+            },
             timeout: 60_000,
             maxOutputBytes: 4_000_000,
             outputMode: "error",
             timeoutBehavior: "error",
           })
           .pipe(Effect.mapError(processError));
-    if (result.code === null || result.code > 1 || result.timedOut) {
+    if (
+      result.code === null ||
+      result.code < 0 ||
+      (input.tool !== "depcruise" && result.code > 1) ||
+      result.timedOut
+    ) {
       return yield* new AnalyzerExecutionError({
         ...input,
         category: "exit",
@@ -406,11 +525,15 @@ const make = Effect.gen(function* () {
     }
     const diagnostics = yield* Effect.try({
       try: () =>
-        input.tool === "biome"
-          ? normalizeBiome(input, result.stdout, paths)
-          : input.operation === "format"
-            ? normalizeFormat(input, result.stdout, paths)
-            : normalizeMago(input, result.stdout, paths, docker?.toHost),
+        input.tool === "eslint"
+          ? normalizeEslint(input, result.stdout, paths)
+          : input.tool === "depcruise"
+            ? normalizeDepcruise(input, result.stdout, paths)
+            : input.tool === "biome"
+              ? normalizeBiome(input, result.stdout, paths)
+              : input.operation === "format"
+                ? normalizeFormat(input, result.stdout, paths)
+                : normalizeMago(input, result.stdout, paths, docker?.toHost),
       catch: (cause) => new AnalyzerExecutionError({ ...input, category: "report", cause }),
     });
     if (input.operation === "format" && result.code !== 0 && diagnostics.length === 0) {

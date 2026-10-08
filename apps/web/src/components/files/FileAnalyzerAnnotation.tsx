@@ -23,7 +23,10 @@ export function FileAnalyzerAnnotation({
               <span>{diagnostic.message}</span>
               <div className="mt-1 text-muted-foreground">
                 {diagnostic.tool} · {diagnostic.operation} · {diagnostic.severity} ·{" "}
-                {diagnostic.ruleId} · L{diagnostic.line}:{diagnostic.column}
+                {diagnostic.ruleId}
+                {diagnostic.line === undefined
+                  ? " · File"
+                  : ` · L${diagnostic.line}${diagnostic.column === undefined ? "" : `:${diagnostic.column}`}`}
               </div>
             </div>
           </details>
@@ -38,7 +41,10 @@ export function FileAnalyzerAnnotation({
             <span className="font-medium">{diagnostic.message}</span>
             <div className="mt-1 text-muted-foreground">
               {diagnostic.tool} · {diagnostic.operation} · {diagnostic.severity} ·{" "}
-              {diagnostic.ruleId} · L{diagnostic.line}:{diagnostic.column}
+              {diagnostic.ruleId}
+              {diagnostic.line === undefined
+                ? " · File"
+                : ` · L${diagnostic.line}${diagnostic.column === undefined ? "" : `:${diagnostic.column}`}`}
             </div>
           </div>
         ),

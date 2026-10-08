@@ -9,6 +9,29 @@ import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { ChevronsDownUp, ChevronsUpDown } from "lucide";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { useMonolithAreas } from "~/hooks/useMonolithAreas";
+import {
+  Select,
+  SelectItem,
+  SelectPopup,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
+import {
+  ALL_REPOSITORY_GROUP,
+  fileBrowserGroupValue,
+  fileBrowserGroupStorageKey,
+  readFileBrowserGroupPreference,
+  writeFileBrowserGroupPreference,
+  orderFileBrowserGroups,
+  reconcileFileBrowserGroupPreference,
+  visitFileBrowserGroup,
+  isPathInFileBrowserGroup,
+  matchFileBrowserGroup,
+  fileBrowserGroupDirectories,
+  fileBrowserGroupSearchCwd,
+  prefixFileBrowserGroupEntries,
+} from "./fileBrowserGroups";
 import { Button } from "~/components/ui/button";
 import { InputGroup, InputGroupInput } from "~/components/ui/input-group";
 import { MorphIcon } from "~/components/MorphIcon";
@@ -40,6 +63,14 @@ interface FileBrowserPanelProps {
   onOpenFile: (relativePath: string) => void;
   onRefreshSelectedFile?: () => void;
   workspaceMutationId: string | null;
+}
+
+function groupStorage(): Storage | null {
+  try {
+    return typeof window === "undefined" ? null : window.localStorage;
+  } catch {
+    return null;
+  }
 }
 
 function treePath(entry: ProjectEntry): string {
@@ -108,6 +139,36 @@ export default function FileBrowserPanel({
   const { resolvedTheme } = useTheme();
   const composerRef = useComposerHandleContext();
   const fileContextMenu = useFileContextMenu(environmentId);
+  const monolith = useMonolithAreas(environmentId, cwd, { initialize: false });
+  const groupStorageKey = fileBrowserGroupStorageKey(environmentId, cwd);
+  const [rawGroupPreference, setRawGroupPreference] = useState(() =>
+    readFileBrowserGroupPreference(groupStorage(), groupStorageKey),
+  );
+  const groupPreference = useMemo(
+    () => reconcileFileBrowserGroupPreference(rawGroupPreference, monolith.areas),
+    [rawGroupPreference, monolith.areas],
+  );
+  const groups = useMemo(
+    () => orderFileBrowserGroups(monolith.areas, groupPreference.recentAreaIds),
+    [monolith.areas, groupPreference.recentAreaIds],
+  );
+  const activeGroup = groups.find((group) => group.id === groupPreference.activeAreaId) ?? null;
+  const activeGroupPath = activeGroup?.path ?? null;
+  const groupLabel = activeGroup?.name ?? "All repository";
+  const handledGroupReveal = useRef<string | null>(null);
+  const expandedGroupRoot = useRef<string | null>(null);
+  useEffect(() => {
+    if (monolith.loading || monolith.config === null) return;
+    writeFileBrowserGroupPreference(groupStorage(), groupStorageKey, groupPreference);
+    if (JSON.stringify(rawGroupPreference) !== JSON.stringify(groupPreference))
+      queueMicrotask(() =>
+        setRawGroupPreference((current) =>
+          JSON.stringify(current) === JSON.stringify(rawGroupPreference)
+            ? groupPreference
+            : current,
+        ),
+      );
+  }, [groupStorageKey, groupPreference, monolith.loading, monolith.config, rawGroupPreference]);
   const {
     entries: directoryEntries,
     load,
@@ -118,11 +179,18 @@ export default function FileBrowserPanel({
   } = useDirectoryEntries(environmentId, cwd);
   const [query, setQuery] = useState("");
   const [expandAll, setExpandAll] = useState(false);
-  const pathSearch = useProjectPathSearch({ environmentId, cwd, query: query.slice(0, 256) }, 200);
+  const pathSearch = useProjectPathSearch(
+    {
+      environmentId,
+      cwd: fileBrowserGroupSearchCwd(cwd, activeGroupPath),
+      query: query.slice(0, 256),
+    },
+    200,
+  );
   const entries = useMemo(() => {
     const result = new Map(directoryEntries.map((entry) => [entry.path, entry]));
     if (query.trim() && !pathSearch.isPending) {
-      for (const entry of pathSearch.entries) {
+      for (const entry of prefixFileBrowserGroupEntries(pathSearch.entries, activeGroupPath)) {
         if (!result.has(entry.path)) result.set(entry.path, entry);
         const segments = entry.path.split("/");
         for (let index = 1; index < segments.length; index++) {
@@ -131,8 +199,10 @@ export default function FileBrowserPanel({
         }
       }
     }
-    return [...result.values()];
-  }, [directoryEntries, pathSearch.entries, pathSearch.isPending, query]);
+    return [...result.values()].filter((entry) =>
+      isPathInFileBrowserGroup(entry.path, activeGroupPath),
+    );
+  }, [directoryEntries, pathSearch.entries, pathSearch.isPending, query, activeGroupPath]);
   const entryKinds = useMemo(
     () => new Map(entries.map((entry) => [entry.path, entry.kind] as const)),
     [entries],
@@ -144,6 +214,7 @@ export default function FileBrowserPanel({
     [entries],
   );
   const previousTreePathsRef = useRef<readonly string[] | null>(null);
+  const previousGroupPathRef = useRef<string | null | undefined>(undefined);
   const syncingSelectionRef = useRef(false);
   const treeSelectionPathRef = useRef<string | null>(null);
   const handledRevealRef = useRef<{ path: string; revealId: number } | null>(null);
@@ -288,6 +359,47 @@ export default function FileBrowserPanel({
     unsafeCSS: PIERRE_TREE_UNSAFE_CSS,
   });
   const search = useFileTreeSearch(model);
+  const chooseGroup = (areaId: string | null) => {
+    setRawGroupPreference(visitFileBrowserGroup(groupPreference, areaId));
+    setQuery("");
+    search.close();
+    setExpandAll(false);
+    handledRevealRef.current = null;
+    expandedGroupRoot.current = null;
+  };
+  useEffect(() => {
+    if (activeGroupPath === null) return;
+    const controller = new AbortController();
+    void (async () => {
+      for (const directory of fileBrowserGroupDirectories(activeGroupPath)) {
+        if (controller.signal.aborted) return;
+        await load(directory);
+      }
+    })();
+    return () => controller.abort();
+  }, [activeGroupPath, load]);
+  useEffect(() => {
+    if (!selectedPath || monolith.loading || monolith.config === null) return;
+    const key = `${selectedPath}:${selectedPathRevealId}`;
+    if (handledGroupReveal.current === key) return;
+    handledGroupReveal.current = key;
+    const matching = matchFileBrowserGroup(selectedPath, monolith.areas);
+    setRawGroupPreference((current) =>
+      visitFileBrowserGroup(
+        reconcileFileBrowserGroupPreference(current, monolith.areas),
+        matching?.id ?? null,
+      ),
+    );
+    setQuery("");
+    model.closeSearch();
+  }, [
+    selectedPath,
+    selectedPathRevealId,
+    monolith.loading,
+    monolith.config,
+    monolith.areas,
+    model,
+  ]);
   const allDirectoriesExpanded = useFileTreeSelector(model, (currentModel) =>
     areAllDirectoriesExpanded(currentModel, directoryPaths),
   );
@@ -375,13 +487,36 @@ export default function FileBrowserPanel({
     entryKindsRef.current = entryKinds;
     const previousTreePaths = previousTreePathsRef.current;
     previousTreePathsRef.current = treePaths;
-    if (previousTreePaths === null) {
+    if (previousTreePaths === null || previousGroupPathRef.current !== activeGroupPath) {
+      // Reset group boundaries so implicit parent folders from the previous
+      // scope cannot survive after all their visible entries were removed.
+      previousGroupPathRef.current = activeGroupPath;
+      expandedGroupRoot.current = null;
       model.resetPaths(treePaths);
       return;
     }
     const updates = buildFileTreePathUpdates(previousTreePaths, treePaths);
     if (updates.length > 0) model.batch(updates);
-  }, [ready, entryKinds, model, treePaths]);
+  }, [ready, entryKinds, model, treePaths, activeGroupPath]);
+
+  useEffect(() => {
+    if (activeGroupPath === null || activeGroupPath === ".") {
+      expandedGroupRoot.current = null;
+      return;
+    }
+    if (
+      !ready ||
+      expandedGroupRoot.current === activeGroupPath ||
+      !treePaths.includes(`${activeGroupPath}/`) ||
+      !model.getItem(`${activeGroupPath}/`)
+    )
+      return;
+    for (const directory of fileBrowserGroupDirectories(activeGroupPath).filter(Boolean)) {
+      const item = model.getItem(`${directory}/`);
+      if (item && "expand" in item) item.expand();
+    }
+    expandedGroupRoot.current = activeGroupPath;
+  }, [activeGroupPath, model, ready, treePaths]);
 
   useEffect(() => {
     if (expandAll && !query.trim()) setAllDirectoriesExpanded(model, directoryPaths, true);
@@ -488,6 +623,47 @@ export default function FileBrowserPanel({
       className="flex min-h-0 flex-1 flex-col bg-background"
       data-file-browser-panel={`${environmentId}:${cwd}`}
     >
+      {groups.length > 0 ? (
+        <div className="shrink-0 border-b border-border/60 px-2 py-1.5">
+          <Select
+            value={fileBrowserGroupValue(groupPreference.activeAreaId)}
+            items={[
+              ...groups.map((group) => ({
+                value: fileBrowserGroupValue(group.id),
+                label: group.name,
+              })),
+              { value: ALL_REPOSITORY_GROUP, label: "All repository" },
+            ]}
+            onValueChange={(value) => {
+              if (value === ALL_REPOSITORY_GROUP) chooseGroup(null);
+              else if (typeof value === "string" && value.startsWith("area:"))
+                chooseGroup(value.slice(5));
+            }}
+          >
+            <SelectTrigger size="sm" className="w-full" aria-label="File browser project area">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              {groups.map((group) => (
+                <SelectItem key={group.id} value={fileBrowserGroupValue(group.id)}>
+                  {group.name}
+                </SelectItem>
+              ))}
+              <SelectItem value={ALL_REPOSITORY_GROUP}>All repository</SelectItem>
+            </SelectPopup>
+          </Select>
+          {activeGroup ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={<div className="truncate px-1 pt-1 text-3xs text-muted-foreground" />}
+              >
+                {activeGroup.path}
+              </TooltipTrigger>
+              <TooltipPopup>{activeGroup.path}</TooltipPopup>
+            </Tooltip>
+          ) : null}
+        </div>
+      ) : null}
       <div
         className="flex h-10 min-h-10 shrink-0 items-center gap-1 border-b border-border/60 bg-background px-2 in-data-[preview-panel-mode=inline]:mb-1 in-data-[preview-panel-mode=inline]:h-9 in-data-[preview-panel-mode=inline]:min-h-9 in-data-[preview-panel-mode=inline]:border-b-transparent"
         data-surface-subheader
@@ -495,7 +671,7 @@ export default function FileBrowserPanel({
         <RefreshFilesButton isPending={isPending} onRefresh={handleRefresh} />
         <FileSearchField
           name="project-files-search"
-          ariaLabel={`Search ${projectName} files`}
+          ariaLabel={`Search ${groupLabel} files`}
           value={search.value}
           onValueChange={handleSearchValueChange}
           onClose={closeSearch}
@@ -549,7 +725,7 @@ export default function FileBrowserPanel({
       )}
       <FileTree
         model={model}
-        aria-label={`${projectName} files`}
+        aria-label={`${projectName} ${groupLabel} files`}
         className="min-h-0 flex-1 overflow-hidden"
         style={pierreTreeStyle(resolvedTheme)}
       />

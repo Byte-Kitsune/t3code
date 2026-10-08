@@ -129,3 +129,24 @@ it("keeps above-method estimates and declaration hints alongside existing review
   expect(rows[0]!.metadata.queries).toEqual([query]);
   expect(rows[0]!.metadata.devComments).toEqual([dev]);
 });
+
+it("keeps positionless findings for their file but does not invent inline annotation rows", () => {
+  const fileFinding: MonolithAnalyzerDiagnostic = {
+    path: finding.path,
+    tool: "depcruise",
+    operation: "check",
+    severity: "error",
+    message: "Forbidden dependency",
+    ruleId: "no-cross-area-imports",
+  };
+  const diagnostics = fileAnalyzerDiagnostics(
+    [fileFinding, { ...fileFinding, path: "other.ts" }, finding],
+    finding.path,
+    "one\ntwo",
+  );
+  expect(diagnostics).toEqual([fileFinding, finding]);
+  const inline = mergeFileAnalyzerAnnotations([], diagnostics);
+  expect(inline).toHaveLength(1);
+  expect(inline[0]?.lineNumber).toBe(2);
+  expect(inline[0]?.metadata.diagnostics).toEqual([finding]);
+});

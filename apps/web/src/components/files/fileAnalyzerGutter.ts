@@ -24,7 +24,7 @@ export function syncFileAnalyzerGutter(
     row.removeAttribute(SEVERITY_ATTRIBUTE);
   const severityByLine = new Map<number, MonolithAnalyzerDiagnostic["severity"]>();
   for (const finding of diagnostics) {
-    if (!Number.isInteger(finding.line) || finding.line < 1) continue;
+    if (finding.line === undefined || !Number.isInteger(finding.line) || finding.line < 1) continue;
     const current = severityByLine.get(finding.line);
     if (!current || severityOrder[finding.severity] > severityOrder[current])
       severityByLine.set(finding.line, finding.severity);

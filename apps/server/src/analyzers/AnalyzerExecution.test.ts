@@ -74,6 +74,126 @@ function issue(file: string, level = "Error", line = 3) {
 }
 
 describe("AnalyzerExecution", () => {
+  it.effect("reads ESLint positions and filters other files without enabling fixes", () =>
+    Effect.gen(function* () {
+      const input = {
+        ...base,
+        tool: "eslint" as const,
+        operation: "check" as const,
+        command: "/repo/app/node_modules/.bin/eslint",
+        filePath: "/repo/app/src/Test.tsx",
+        configPath: "/repo/app/eslint.config.js",
+      };
+      const report = [
+        {
+          filePath: input.filePath,
+          messages: [
+            {
+              ruleId: "no-unused-vars",
+              severity: 2,
+              message: "Unused variable",
+              line: 3,
+              column: 7,
+              endLine: 3,
+              endColumn: 10,
+            },
+          ],
+        },
+        { filePath: "/repo/app/src/Other.tsx", messages: [{ severity: 2, message: "Other" }] },
+      ];
+      const { effect, calls } = runWith(JSON.stringify(report), 1, input);
+      const result = yield* effect;
+      expect(result.diagnostics).toEqual([
+        {
+          path: "app/src/Test.tsx",
+          line: 3,
+          column: 7,
+          endLine: 3,
+          endColumn: 10,
+          severity: "error",
+          message: "Unused variable",
+          ruleId: "no-unused-vars",
+          tool: "eslint",
+          operation: "check",
+        },
+      ]);
+      expect(calls[0]?.args).toEqual([
+        "--format",
+        "json",
+        "--no-fix",
+        "--config",
+        input.configPath,
+        input.filePath,
+      ]);
+      expect(result.status).toBe("findings");
+    }),
+  );
+  it.effect(
+    "keeps dependency-cruiser area context and exposes inbound violations without invented lines",
+    () =>
+      Effect.gen(function* () {
+        const input = {
+          ...base,
+          tool: "depcruise" as const,
+          operation: "check" as const,
+          command: "/repo/app/node_modules/.bin/depcruise",
+          filePath: "/repo/app/app/Target.ts",
+          sourcePaths: ["/repo/app/app"],
+          configPath: "/repo/app/.dependency-cruiser.cjs",
+        };
+        const { effect, calls } = runWith(
+          JSON.stringify({
+            summary: {
+              violations: [
+                {
+                  from: "app/Caller.ts",
+                  to: "app/Target.ts",
+                  rule: { name: "no-cross-layer", severity: "error" },
+                },
+                {
+                  from: "../../outside.ts",
+                  to: "app/Other.ts",
+                  rule: { name: "outside", severity: "warn" },
+                },
+              ],
+            },
+          }),
+          2,
+          input,
+        );
+        const result = yield* effect;
+        expect(result.diagnostics).toEqual([
+          {
+            path: "app/app/Target.ts",
+            severity: "error",
+            message: "no-cross-layer: app/Caller.ts → app/Target.ts",
+            ruleId: "no-cross-layer",
+            tool: "depcruise",
+            operation: "check",
+          },
+        ]);
+        expect(calls[0]?.args).toEqual([
+          "--output-type",
+          "json",
+          "--config",
+          input.configPath,
+          "/repo/app/app",
+        ]);
+        expect(calls[0]?.args).not.toContain(input.filePath);
+      }),
+  );
+  it.effect("rejects dependency-cruiser scopes outside the repository before execution", () =>
+    Effect.gen(function* () {
+      const { effect, calls } = runWith('{"summary":{"violations":[]}}', 0, {
+        ...base,
+        tool: "depcruise",
+        operation: "check",
+        sourcePaths: ["/outside"],
+      });
+      expect((yield* Effect.exit(effect))._tag).toBe("Failure");
+      expect(calls).toEqual([]);
+    }),
+  );
   it.effect(
     "preserves full PHP context while selecting the opened file and zero-based positions",
     () =>

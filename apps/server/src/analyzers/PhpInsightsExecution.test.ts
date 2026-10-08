@@ -59,6 +59,7 @@ function mockRunner(
     expectedSecurityDisabled?: boolean;
     expectedSecurityPaths?: readonly { areaRelativePath: string }[];
     missingGraph?: boolean;
+    graphReport?: unknown;
     changeSource?: boolean;
     changeConfig?: boolean;
     changeConfigDuringRead?: boolean;
@@ -185,7 +186,12 @@ function mockRunner(
       if (!options.missingGraph)
         yield* fs.writeFileString(
           data.graphOutput!,
-          encode({ status: "unavailable", message: "No graph extension installed." }),
+          encode(
+            options.graphReport ?? {
+              status: "unavailable",
+              message: "No graph extension installed.",
+            },
+          ),
         );
       if (options.changeSource)
         yield* fs.writeFileString(
@@ -606,5 +612,59 @@ it.effect("honors an explicitly disabled native Symfony security rule", () =>
       service.run(input),
     ).pipe(Effect.provide(runLayer(runner.run)));
     expect(result.security?.run).toBeUndefined();
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("selects distinct opened and indexed file chains from one full graph snapshot", () =>
+  Effect.gen(function* () {
+    const input = yield* setup;
+    const fs = yield* FileSystem.FileSystem;
+    yield* fs.writeFileString(`${input.workspaceRoot}/app/src/Other.php`, "<?php class Other {}");
+    const mock = mockRunner({
+      graphReport: {
+        status: "snapshot",
+        snapshot: {
+          schema_version: "1",
+          capability: "full_source_call_graph",
+          complete: true,
+          max_depth: 8,
+          unknown: [],
+          nodes: [
+            {
+              id: "entry",
+              symbol: "Test::run",
+              path: "src/Test.php",
+              line: 1,
+              column: 1,
+              entry_scope: "http",
+            },
+            {
+              id: "target",
+              symbol: "Other::run",
+              path: "src/Other.php",
+              line: 1,
+              column: 1,
+              entry_scope: null,
+            },
+          ],
+          edges: [{ from: "entry", to: "target", path: "src/Test.php", line: 1, column: 1 }],
+        },
+      },
+    });
+    const result = yield* Effect.flatMap(PhpInsightsExecution.PhpInsightsExecution, (service) =>
+      service.run({ ...input, indexPaths: ["app/src/Test.php", "app/src/Other.php"] }),
+    ).pipe(Effect.provide(runLayer(mock.run)));
+    expect(result.entryChains.targets[0]?.symbol).toBe("Test::run");
+    expect(
+      result.indexedFiles?.map((file) => [
+        file.path,
+        file.entryChains.targets[0]?.symbol,
+        file.entryChains.targets[0]?.entries[0]?.chain.length,
+      ]),
+    ).toEqual([
+      ["app/src/Test.php", "Test::run", 1],
+      ["app/src/Other.php", "Other::run", 2],
+    ]);
+    expect(mock.calls).toHaveLength(2);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

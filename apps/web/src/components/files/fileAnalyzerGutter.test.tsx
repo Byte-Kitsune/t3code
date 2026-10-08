@@ -97,3 +97,19 @@ describe("file analyzer line gutter", () => {
     }
   });
 });
+
+it("does not mark a gutter row for dependency-cruiser findings without line information", () => {
+  const host = document.createElement("div");
+  host.innerHTML = '<div data-column-number="1">1</div>';
+  syncFileAnalyzerGutter(host, [
+    {
+      tool: "depcruise",
+      operation: "check",
+      path: "app/source.ts",
+      severity: "error",
+      ruleId: "architecture",
+      message: "Forbidden dependency",
+    },
+  ]);
+  expect(host.querySelector("[data-t3-analyzer-severity]")).toBeNull();
+});

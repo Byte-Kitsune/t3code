@@ -17,7 +17,7 @@ import * as Schema from "effect/Schema";
 import * as MagoDockerExecution from "./MagoDockerExecution.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { decodePhpQueryInsights, normalizePhpQueryInsights } from "./PhpQueryInsights.ts";
-import { normalizePhpEntryInsightsReport } from "./PhpEntryInsights.ts";
+import { preparePhpEntryInsightsReport } from "./PhpEntryInsights.ts";
 import { normalizePhpThresholdInsights } from "./PhpThresholdInsights.ts";
 import { normalizePhpSecurityInsights, type PhpSecurityInsights } from "./PhpSecurityInsights.ts";
 import { PHP_INSIGHTS_WORKER_SOURCE } from "./PhpInsightsWorkerSource.ts";
@@ -200,10 +200,10 @@ const make = Effect.gen(function* () {
       while (pending.length) {
         const directory = pending.pop()!;
         for (const name of yield* fs.readDirectory(directory)) {
-          if (++visited > 50_000)
+          if (++visited > 100_000)
             return yield* new PhpInsightsExecutionError({
               stage: "input",
-              cause: "PHP source snapshot exceeds the 50,000 entry inspection limit.",
+              cause: "PHP source snapshot exceeds the 100,000 entry inspection limit.",
             });
           if (["vendor", "node_modules", ".git"].includes(name)) continue;
           const target = paths.join(directory, name);
@@ -524,15 +524,19 @@ const make = Effect.gen(function* () {
           ),
           Effect.result,
         );
-        const graph = yield* sidecar(graphOutput).pipe(
+        const graphSelector = yield* sidecar(graphOutput).pipe(
           Effect.flatMap((raw) => decodeJson(raw)),
           Effect.flatMap((value) =>
-            Effect.try(() =>
-              normalizePhpEntryInsightsReport(value, workerInput.areaRelativePath, input.areaPath),
-            ),
+            Effect.try(() => preparePhpEntryInsightsReport(value, input.areaPath)),
           ),
           Effect.result,
         );
+        const graph =
+          graphSelector._tag === "Success"
+            ? yield* Effect.try(() => graphSelector.success(workerInput.areaRelativePath)).pipe(
+                Effect.result,
+              )
+            : graphSelector;
         const thresholds = yield* sidecar(thresholdOutput).pipe(
           Effect.flatMap(decodeJson),
           Effect.flatMap((value) => Effect.try(() => normalizePhpThresholdInsights(value))),
@@ -571,10 +575,6 @@ const make = Effect.gen(function* () {
             Effect.flatMap(decodeJson),
             Effect.result,
           );
-          const graphReport = yield* sidecar(graphOutput).pipe(
-            Effect.flatMap(decodeJson),
-            Effect.result,
-          );
           indexedFiles = input.indexPaths.map((file) => {
             const pathInArea = paths
               .relative(areaRoot, paths.resolve(input.workspaceRoot, file))
@@ -603,12 +603,7 @@ const make = Effect.gen(function* () {
               /* Keep a failed query result independently from the graph. */
             }
             try {
-              if (graphReport._tag === "Success")
-                entryChains = normalizePhpEntryInsightsReport(
-                  graphReport.success,
-                  pathInArea,
-                  input.areaPath,
-                );
+              if (graphSelector._tag === "Success") entryChains = graphSelector.success(pathInArea);
             } catch {
               /* Keep a failed graph result independently from queries. */
             }

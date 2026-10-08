@@ -74,8 +74,10 @@ const make = Effect.gen(function* () {
   const discovery = yield* AnalyzerDiscoveryService.AnalyzerDiscoveryService;
   const execution = yield* AnalyzerExecution.AnalyzerExecution;
   const phpInsights = yield* PhpInsightsExecution.PhpInsightsExecution;
-  // Opening several files must not fan out unbounded project-wide PHP checks.
-  const checks = yield* Semaphore.make(2);
+  // Reserve one lane for opened files so a long background format batch cannot
+  // consume all capacity. At most two project-wide checks run concurrently.
+  const foregroundChecks = yield* Semaphore.make(1);
+  const backgroundChecks = yield* Semaphore.make(1);
   const discover: MonolithAnalyzerService["Service"]["discover"] = Effect.fn(
     "MonolithAnalyzerService.discover",
   )(function* ({ cwd }) {
@@ -202,10 +204,11 @@ const make = Effect.gen(function* () {
             ),
           );
         const runtime = tool === "mago" ? configuredArea?.magoDocker : undefined;
+        const toolInstallations =
+          installations[0]?.tools.filter((candidate) => candidate.tool === tool) ?? [];
         const installation =
-          (!runtime
-            ? installations[0]?.tools.find((candidate) => candidate.available)
-            : undefined) ?? installations[0]?.tools[0];
+          (!runtime ? toolInstallations.find((candidate) => candidate.available) : undefined) ??
+          toolInstallations[0];
         const phpSources = [...indexedSources.values()].filter((source) =>
           /\.php$/i.test(source.file),
         );
@@ -214,7 +217,9 @@ const make = Effect.gen(function* () {
             ? /\.php$/i.test(file) || phpSources.length > 0
               ? (["format", "analyze", "guard"] as const)
               : []
-            : (["check"] as const);
+            : !installation && (installations[0]?.tools.length ?? 0) > 0
+              ? []
+              : (["check"] as const);
         for (const operation of operations) {
           if (!installation || (!installation.available && !runtime)) {
             runs.push({
@@ -427,6 +432,80 @@ const make = Effect.gen(function* () {
         }
       }
     }
+    const jsSources = [...indexedSources.values()].filter((source) =>
+      /\.(?:[cm]?[jt]sx?)$/i.test(source.file),
+    );
+    if (
+      area?.kind === "react" &&
+      (/\.(?:[cm]?[jt]sx?)$/i.test(input.path) || jsSources.length > 0)
+    ) {
+      const installations = yield* discovery
+        .discover({ cwd: root, areas: [area] })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new MonolithAnalyzerError({ operation: "check", reason: "discovery", cause }),
+          ),
+        );
+      for (const tool of ["eslint", "depcruise"] as const) {
+        const candidates =
+          installations[0]?.tools.filter((candidate) => candidate.tool === tool) ?? [];
+        const installation = candidates.find((candidate) => candidate.available) ?? candidates[0];
+        if (!installation) continue;
+        if (!installation.available) {
+          runs.push({
+            tool,
+            operation: "check",
+            status: "unavailable",
+            diagnosticCount: 0,
+            message: `No installed local ${tool} binary was found for this area.`,
+          });
+          continue;
+        }
+        const script = installation.scripts.find((script) => script.operation === "check");
+        const configPath = script?.configPath ?? installation.configPath;
+        const openedJs = /\.(?:[cm]?[jt]sx?)$/i.test(input.path);
+        const checked = yield* execution
+          .run({
+            tool,
+            operation: "check",
+            command: path.resolve(root, installation.binaryPath),
+            cwd: path.resolve(root, installation.workingDirectory),
+            workspaceRoot: root,
+            filePath: openedJs ? file : jsSources[0]!.file,
+            sourceText: openedJs ? contents : jsSources[0]!.contents,
+            ...(indexPaths === undefined
+              ? {}
+              : { filePaths: jsSources.map((source) => source.file) }),
+            ...(configPath === undefined ? {} : { configPath: path.resolve(root, configPath) }),
+            ...(tool === "depcruise"
+              ? {
+                  sourcePaths: (script?.sourcePaths?.length ? script.sourcePaths : [area.path]).map(
+                    (source) => path.resolve(root, source),
+                  ),
+                }
+              : {}),
+          })
+          .pipe(Effect.result);
+        if (checked._tag === "Failure")
+          runs.push({
+            tool,
+            operation: "check",
+            status: "failed",
+            diagnosticCount: 0,
+            message: checked.failure.message,
+          });
+        else {
+          diagnostics.push(...checked.success.diagnostics);
+          runs.push({
+            tool,
+            operation: "check",
+            status: checked.success.status,
+            diagnosticCount: checked.success.diagnostics.length,
+          });
+        }
+      }
+    }
     let indexedSourceChanged = false;
     for (const source of indexedSources.values())
       if ((yield* revision(yield* fs.readFileString(source.file))) !== source.revision)
@@ -509,15 +588,21 @@ const make = Effect.gen(function* () {
                   revision: source.revision,
                   diagnostics: fileDiagnostics,
                   runs: runs
-                    .filter((run) => /\.php$/i.test(sourcePath) || run.operation === "check")
+                    .filter((run) =>
+                      run.tool === "eslint" || run.tool === "depcruise"
+                        ? /\.(?:[cm]?[jt]sx?)$/i.test(sourcePath)
+                        : /\.php$/i.test(sourcePath) || run.operation === "check",
+                    )
                     .map((run) => ({
                       ...run,
                       diagnosticCount: fileDiagnostics.filter(
-                        (item) => item.operation === run.operation,
+                        (item) => item.operation === run.operation && item.tool === run.tool,
                       ).length,
                       status:
                         run.status === "findings"
-                          ? fileDiagnostics.some((item) => item.operation === run.operation)
+                          ? fileDiagnostics.some(
+                              (item) => item.operation === run.operation && item.tool === run.tool,
+                            )
                             ? ("findings" as const)
                             : ("passed" as const)
                           : run.status,
@@ -540,7 +625,7 @@ const make = Effect.gen(function* () {
   return MonolithAnalyzerService.of({
     discover,
     indexArea: (input) =>
-      checks.withPermits(1)(
+      backgroundChecks.withPermits(1)(
         Effect.gen(function* () {
           if (input.paths.length === 0) return [];
           const result = yield* checkFile({ cwd: input.cwd, path: input.paths[0]! }, input.paths);
@@ -556,7 +641,7 @@ const make = Effect.gen(function* () {
         ),
       ),
     checkFile: (input) =>
-      checks
+      foregroundChecks
         .withPermits(1)(checkFile(input))
         .pipe(
           Effect.mapError((cause) =>

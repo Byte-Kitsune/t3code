@@ -1,4 +1,5 @@
 import type { useMonolithFileCheck } from "~/hooks/useMonolithFileCheck";
+import { FileAnalyzerAnnotation } from "./FileAnalyzerAnnotation";
 import { fileCheckSummary } from "./fileAnalyzerStatusHelpers";
 import { phpInsightStatusLabel } from "./phpInsightTargets";
 
@@ -39,6 +40,14 @@ export function FileAnalyzerStatus({
             {run.message ? ` — ${run.message}` : ""}
           </p>
         ))}
+        {check.status === "checked" &&
+        check.diagnostics.some((diagnostic) => diagnostic.line === undefined) ? (
+          <div aria-label="File-level analyzer findings">
+            <FileAnalyzerAnnotation
+              diagnostics={check.diagnostics.filter((diagnostic) => diagnostic.line === undefined)}
+            />
+          </div>
+        ) : null}
         {check.status === "checked" && check.result?.queryBudget ? (
           <p>
             Doctrine queries: {phpInsightStatusLabel(check.result.queryBudget.status)}

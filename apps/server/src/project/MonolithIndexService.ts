@@ -23,15 +23,56 @@ import { matchMonolithArea } from "@t3tools/shared/monolithAreas";
 import * as MonolithAnalyzerService from "./MonolithAnalyzerService.ts";
 import * as MonolithService from "./MonolithService.ts";
 
+const MiB = 1024 * 1024;
+const MAX_SCAN_ENTRIES = 100000;
+const MAX_SOURCE_FILES = 50000;
+const MAX_SOURCE_BYTES = 256 * MiB;
+const MAX_FINGERPRINT_BYTES = 512 * MiB;
+const MAX_SOURCE_FILE_BYTES = 2 * MiB;
+const MAX_DEPENDENCY_FILE_BYTES = 64 * MiB;
+const MAX_BATCH_FILES = 2000;
+const MAX_BATCH_BYTES = 32 * MiB;
+const MAX_CACHE_BYTES = 64 * MiB;
+
 export class MonolithIndexError extends Schema.TaggedError<MonolithIndexError>()(
   "MonolithIndexError",
   {
     operation: Schema.Literals(["index", "status", "check"]),
     reason: Schema.Literals(["configuration", "filesystem", "unsafe_path", "limit", "analysis"]),
+    limit: Schema.optional(
+      Schema.Literals([
+        "scan_entries",
+        "source_files",
+        "source_bytes",
+        "fingerprint_bytes",
+        "source_file_bytes",
+        "dependency_file_bytes",
+        "cache_bytes",
+      ]),
+    ),
+    path: Schema.optional(Schema.String.check(Schema.isMaxLength(1024))),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message() {
+    if (this.reason === "limit") {
+      switch (this.limit) {
+        case "scan_entries":
+          return "Automatic indexing exceeded the limit of 100,000 filesystem entries in this area.";
+        case "source_files":
+          return "Automatic indexing exceeded the limit of 50,000 source files in this area.";
+        case "source_bytes":
+          return "Automatic indexing exceeded the 256 MiB source-content limit for this area.";
+        case "fingerprint_bytes":
+          return "Automatic indexing exceeded the 512 MiB source and dependency-content limit for this area.";
+        case "source_file_bytes":
+          return `The source file ${this.path ?? "in this area"} exceeds the 2 MiB automatic indexing limit. Other files can still be checked individually.`;
+        case "dependency_file_bytes":
+          return `The dependency file ${this.path ?? "in this area"} exceeds the 64 MiB automatic indexing limit.`;
+        case "cache_bytes":
+          return "The analysis results exceed the 64 MiB area-cache limit. Reduce the indexed area or exclude generated folders.";
+      }
+    }
     return `Monolith indexing could not complete (${this.reason}).`;
   }
 }
@@ -44,13 +85,13 @@ export type MonolithAreaIndexStatus = {
   readonly message?: string;
 };
 
+const CacheEntry = Schema.Struct({ path: Schema.String, result: MonolithCheckFileResult });
+const encodeCacheEntry = Schema.encodeSync(Schema.fromJsonString(CacheEntry));
 const Cache = Schema.Struct({
-  version: Schema.Literal(2),
+  version: Schema.Literal(3),
   signature: Schema.String,
   createdAt: Schema.Number,
-  files: Schema.Array(
-    Schema.Struct({ path: Schema.String, result: MonolithCheckFileResult }),
-  ).check(Schema.isMaxLength(2000)),
+  files: Schema.Array(CacheEntry).check(Schema.isMaxLength(MAX_SOURCE_FILES)),
 });
 type Cache = typeof Cache.Type;
 const decodeCache = Schema.decodeUnknownSync(Schema.fromJsonString(Cache));
@@ -75,6 +116,11 @@ export class MonolithIndexService extends Context.Service<
     readonly status: (
       input: MonolithIndexStatusInput,
     ) => Effect.Effect<MonolithIndexStatus, MonolithIndexError>;
+    /** Waits for the jobs already registered for this workspace; failures are reported by status. */
+    readonly awaitIdle: (input: {
+      readonly cwd: string;
+      readonly areaId?: string;
+    }) => Effect.Effect<void, MonolithIndexError>;
     readonly checkFileCached: (
       input: MonolithCheckFileInput,
     ) => Effect.Effect<typeof MonolithCheckFileResult.Type, MonolithIndexError>;
@@ -144,29 +190,56 @@ const make = Effect.gen(function* () {
     const records: [string, string][] = [];
     const files: string[] = [];
     const revisions = new Map<string, string>();
+    const sizes = new Map<string, number>();
+    const recorded = new Set<string>();
     const folders = [areaRoot];
     let entries = 0;
     let sourceBytes = 0;
+    let fingerprintBytes = 0;
     const addFile = Effect.fnUntraced(function* (absolute: string, source: boolean) {
       const info = yield* fs.stat(absolute);
       if (info.type !== "File") return;
-      if (info.size > (source ? 2 : 4) * 1024 * 1024)
-        return yield* new MonolithIndexError({ operation: "index", reason: "limit" });
-      if (source && (sourceBytes += Number(info.size)) > 32 * 1024 * 1024)
-        return yield* new MonolithIndexError({ operation: "index", reason: "limit" });
       const relative = path.relative(root, absolute).split(path.sep).join("/");
-      const hash = yield* digest(yield* fs.readFileString(absolute));
-      records.push([relative, hash]);
+      if (recorded.has(relative)) return;
+      if (info.size > (source ? MAX_SOURCE_FILE_BYTES : MAX_DEPENDENCY_FILE_BYTES))
+        return yield* new MonolithIndexError({
+          operation: "index",
+          reason: "limit",
+          limit: source ? "source_file_bytes" : "dependency_file_bytes",
+          path: relative.slice(0, 1024),
+        });
+      const contents = yield* fs.readFileString(absolute);
+      const bytes = new TextEncoder().encode(contents).byteLength;
+      if (source && (sourceBytes += bytes) > MAX_SOURCE_BYTES)
+        return yield* new MonolithIndexError({
+          operation: "index",
+          reason: "limit",
+          limit: "source_bytes",
+        });
+      if ((fingerprintBytes += bytes) > MAX_FINGERPRINT_BYTES)
+        return yield* new MonolithIndexError({
+          operation: "index",
+          reason: "limit",
+          limit: "fingerprint_bytes",
+        });
+      const hash = yield* digest(contents);
+      records.push([relative, `${source ? "source" : "dependency"}:${hash}`]);
+      recorded.add(relative);
       if (source) {
         files.push(relative);
         revisions.set(relative, hash);
+        sizes.set(relative, bytes);
       }
     });
     while (folders.length) {
       const folder = folders.pop()!;
       for (const name of (yield* fs.readDirectory(folder)).toSorted()) {
-        if (++entries > 20000)
-          return yield* new MonolithIndexError({ operation: "index", reason: "limit" });
+        if (++entries > MAX_SCAN_ENTRIES)
+          return yield* new MonolithIndexError({
+            operation: "index",
+            reason: "limit",
+            limit: "scan_entries",
+          });
         const absolute = path.join(folder, name);
         const info = yield* fs.stat(absolute);
         if ((yield* fs.realPath(absolute)) !== absolute) continue;
@@ -184,14 +257,18 @@ const make = Effect.gen(function* () {
         ) {
           const candidateSource =
             area.kind === "php"
-              ? /\.php$/i.test(name)
+              ? /\.(?:php|ya?ml)$/i.test(name)
               : /\.(?:[cm]?[jt]sx?|jsonc?|css)$/i.test(name);
           const relative = path.relative(root, absolute).split(path.sep).join("/");
           const source =
             candidateSource && matchMonolithArea({ path: relative }, groups)?.id === area.id;
           yield* addFile(absolute, source);
-          if (files.length > 2000)
-            return yield* new MonolithIndexError({ operation: "index", reason: "limit" });
+          if (files.length > MAX_SOURCE_FILES)
+            return yield* new MonolithIndexError({
+              operation: "index",
+              reason: "limit",
+              limit: "source_files",
+            });
           if (name === "composer.json") {
             const installed = path.join(folder, "vendor/composer/installed.json");
             if ((yield* fs.exists(installed)) && (yield* fs.realPath(installed)) === installed)
@@ -236,8 +313,12 @@ const make = Effect.gen(function* () {
       while (composeFolders.length) {
         const folder = composeFolders.pop()!;
         for (const name of yield* fs.readDirectory(folder)) {
-          if (++entries > 20000)
-            return yield* new MonolithIndexError({ operation: "index", reason: "limit" });
+          if (++entries > MAX_SCAN_ENTRIES)
+            return yield* new MonolithIndexError({
+              operation: "index",
+              reason: "limit",
+              limit: "scan_entries",
+            });
           const file = path.join(folder, name);
           if ((yield* fs.realPath(file)) !== file) continue;
           const info = yield* fs.stat(file);
@@ -252,6 +333,7 @@ const make = Effect.gen(function* () {
       signature: yield* digest(encodeFingerprint({ area, records })),
       files: files.toSorted(),
       revisions,
+      sizes,
     };
   });
   const cachePath = Effect.fnUntraced(function* (root: string, areaId: string) {
@@ -264,7 +346,7 @@ const make = Effect.gen(function* () {
     const file = yield* cachePath(root, area.id);
     if (!(yield* fs.exists(file))) return null;
     const info = yield* fs.stat(file);
-    if ((yield* fs.realPath(file)) !== file || info.type !== "File" || info.size > 16 * 1024 * 1024)
+    if ((yield* fs.realPath(file)) !== file || info.type !== "File" || info.size > MAX_CACHE_BYTES)
       return null;
     // Invalid and older cache files are misses, never analyzer results.
     const parsed = yield* fs.readFileString(file).pipe(
@@ -276,8 +358,12 @@ const make = Effect.gen(function* () {
   });
   const publish = Effect.fnUntraced(function* (root: string, area: MonolithArea, cache: Cache) {
     const encoded = encodeCache(cache);
-    if (new TextEncoder().encode(encoded).byteLength > 16 * 1024 * 1024)
-      return yield* new MonolithIndexError({ operation: "index", reason: "limit" });
+    if (new TextEncoder().encode(encoded).byteLength > MAX_CACHE_BYTES)
+      return yield* new MonolithIndexError({
+        operation: "index",
+        reason: "limit",
+        limit: "cache_bytes",
+      });
     const parent = path.join(root, ".t3");
     if (yield* fs.exists(parent)) yield* safeDirectory(parent);
     else yield* fs.makeDirectory(parent);
@@ -300,7 +386,13 @@ const make = Effect.gen(function* () {
     if (!cache || cache.signature !== signature) return false;
     const degraded = cache.files.some(
       ({ result }) =>
-        result.runs.some((run) => run.status === "failed" || run.status === "unavailable") ||
+        result.runs.some(
+          (run) =>
+            run.status === "unavailable" ||
+            (run.status === "failed" &&
+              run.message !==
+                "Symfony configuration security inspection was incomplete for one or more files."),
+        ) ||
         [result.queryBudget, result.entryChains].some(
           (insight) =>
             insight?.status === "failed" ||
@@ -353,8 +445,18 @@ const make = Effect.gen(function* () {
   const start = Effect.fnUntraced(function* (root: string, area: MonolithArea, force = false) {
     const key = keyOf(root, area.id);
     if (running.has(key)) return;
-    const current = yield* state(root, area);
-    if (!force && current.status === "ready") return;
+    const cached = yield* loadCache(root, area);
+    const current = statuses.get(key) ?? {
+      areaId: area.id,
+      status: "idle" as const,
+      fileCount: cached?.files.length ?? 0,
+    };
+    if (
+      !force &&
+      current.status === "failed" &&
+      (yield* Clock.currentTimeMillis) - (failedAt.get(key) ?? 0) < 30000
+    )
+      return;
     const completion = yield* Deferred.make<void>();
     // State validation yields for I/O; another requester may have started this area meanwhile.
     if (running.has(key)) return;
@@ -363,13 +465,58 @@ const make = Effect.gen(function* () {
     statuses.set(key, { areaId: area.id, status: "indexing", fileCount: current.fileCount });
     const work = Effect.gen(function* () {
       const before = yield* fingerprint(root, area);
-      const files = yield* analyzer
-        .indexArea({ cwd: root, areaId: area.id, paths: before.files })
-        .pipe(
-          Effect.mapError(
-            (cause) => new MonolithIndexError({ operation: "index", reason: "analysis", cause }),
-          ),
-        );
+      if (!force && (yield* usable(cached, before.signature))) {
+        statuses.set(key, {
+          areaId: area.id,
+          status: "ready",
+          fileCount: cached!.files.length,
+          revision: before.signature,
+        });
+        return;
+      }
+      const batches: string[][] = [];
+      let batch: string[] = [];
+      let bytes = 0;
+      for (const file of before.files) {
+        const size = before.sizes.get(file)!;
+        if (batch.length && (batch.length >= MAX_BATCH_FILES || bytes + size > MAX_BATCH_BYTES)) {
+          batches.push(batch);
+          batch = [];
+          bytes = 0;
+        }
+        batch.push(file);
+        bytes += size;
+      }
+      if (batch.length) batches.push(batch);
+      const files: Cache["files"][number][] = [];
+      // Reserve bounded header/timestamp overhead and account each entry before retaining it.
+      // Never serialize an unbounded whole-area graph merely to discover it exceeds the limit.
+      let cacheBytes = 1024;
+      for (const [index, paths] of batches.entries()) {
+        statuses.set(key, {
+          areaId: area.id,
+          status: "indexing",
+          fileCount: before.files.length,
+          message: `Checking batch ${index + 1} of ${batches.length}.`,
+        });
+        const results = yield* analyzer
+          .indexArea({ cwd: root, areaId: area.id, paths })
+          .pipe(
+            Effect.mapError(
+              (cause) => new MonolithIndexError({ operation: "index", reason: "analysis", cause }),
+            ),
+          );
+        for (const entry of results) {
+          cacheBytes += new TextEncoder().encode(encodeCacheEntry(entry)).byteLength + 1;
+          if (cacheBytes > MAX_CACHE_BYTES)
+            return yield* new MonolithIndexError({
+              operation: "index",
+              reason: "limit",
+              limit: "cache_bytes",
+            });
+          files.push(entry);
+        }
+      }
       const after = yield* fingerprint(root, area);
       const currentArea = (yield* config(root)).areas.find((candidate) => candidate.id === area.id);
       if (
@@ -389,7 +536,7 @@ const make = Effect.gen(function* () {
         return;
       }
       yield* publish(root, area, {
-        version: 2,
+        version: 3,
         signature: after.signature,
         createdAt: yield* Clock.currentTimeMillis,
         files,
@@ -443,50 +590,69 @@ const make = Effect.gen(function* () {
     if (areaId && !areas.some((area) => area.id === areaId))
       return yield* new MonolithIndexError({ operation: "index", reason: "configuration" });
     for (const area of areas) if (!areaId || area.id === areaId) yield* start(root, area, force);
-    return { areas: yield* Effect.forEach(areas, (area) => state(root, area)) };
+    return {
+      areas: areas.map(
+        (area) =>
+          statuses.get(keyOf(root, area.id)) ?? {
+            areaId: area.id,
+            status: "idle" as const,
+            fileCount: 0,
+          },
+      ),
+    };
   });
-  const checkFileCached = Effect.fn("MonolithIndexService.checkFileCached")(function* (
-    input: MonolithCheckFileInput,
-  ) {
-    const { root, areas, allAreas } = yield* config(input.cwd);
-    const boundary = matchMonolithArea({ path: input.path }, allAreas);
-    const area = areas.find((candidate) => candidate.id === boundary?.id);
-    if (area) {
-      const cache = yield* loadCache(root, area);
-      const current = yield* fingerprint(root, area);
-      if (!current.revisions.has(input.path))
-        return yield* analyzer
-          .checkFile(input)
-          .pipe(
-            Effect.mapError(
-              (cause) => new MonolithIndexError({ operation: "check", reason: "analysis", cause }),
-            ),
-          );
-      const result = (yield* usable(cache, current.signature))
-        ? cache!.files.find((entry) => entry.path === input.path)?.result
-        : undefined;
-      if (result && result.revision === current.revisions.get(input.path)) return result;
-      yield* start(root, area);
-      const completion = completions.get(keyOf(root, area.id));
-      if (completion) yield* Deferred.await(completion);
-      const latestArea = (yield* config(root)).areas.find((candidate) => candidate.id === area.id);
-      if (latestArea) {
-        const latest = yield* fingerprint(root, latestArea);
-        const updated = yield* loadCache(root, latestArea);
-        const cached = (yield* usable(updated, latest.signature))
-          ? updated!.files.find((entry) => entry.path === input.path)?.result
-          : undefined;
-        if (cached && cached.revision === latest.revisions.get(input.path)) return cached;
-      }
-      return yield* new MonolithIndexError({ operation: "check", reason: "analysis" });
-    }
-    return yield* analyzer
+  const foreground = (input: MonolithCheckFileInput) =>
+    analyzer
       .checkFile(input)
       .pipe(
         Effect.mapError(
           (cause) => new MonolithIndexError({ operation: "check", reason: "analysis", cause }),
         ),
       );
+  const checkFileCached = Effect.fn("MonolithIndexService.checkFileCached")(function* (
+    input: MonolithCheckFileInput,
+  ) {
+    const { root, areas, allAreas } = yield* config(input.cwd);
+    const boundary = matchMonolithArea({ path: input.path }, allAreas);
+    const area = areas.find((candidate) => candidate.id === boundary?.id);
+    if (!area) return yield* foreground(input);
+    const source = area.kind === "php" ? /\.(?:php|ya?ml)$/i : /\.(?:[cm]?[jt]sx?|jsonc?|css)$/i;
+    if (!source.test(input.path)) return yield* foreground(input);
+    const cache = yield* loadCache(root, area);
+    if (running.has(keyOf(root, area.id)) || !cache) {
+      yield* start(root, area);
+      return yield* foreground(input);
+    }
+    const current = yield* fingerprint(root, area).pipe(
+      Effect.catchTags({
+        MonolithIndexError: (error) =>
+          error.reason === "limit" ? Effect.succeed(null) : Effect.fail(error),
+      }),
+    );
+    if (!current) return yield* foreground(input);
+    if (!current.revisions.has(input.path)) return yield* foreground(input);
+    const result = (yield* usable(cache, current.signature))
+      ? cache.files.find((entry) => entry.path === input.path)?.result
+      : undefined;
+    if (result && result.revision === current.revisions.get(input.path)) return result;
+    yield* start(root, area);
+    return yield* foreground(input);
+  });
+  const awaitIdle = Effect.fn("MonolithIndexService.awaitIdle")(function* ({
+    cwd,
+    areaId,
+  }: {
+    readonly cwd: string;
+    readonly areaId?: string;
+  }) {
+    const { root, areas } = yield* config(cwd);
+    const jobs = areas
+      .filter((area) => !areaId || area.id === areaId)
+      .flatMap((area) => {
+        const completion = completions.get(keyOf(root, area.id));
+        return completion ? [completion] : [];
+      });
+    yield* Effect.forEach(jobs, (job) => Deferred.await(job), { discard: true });
   });
   const mapError = <A>(
     operation: "index" | "status" | "check",
@@ -501,6 +667,7 @@ const make = Effect.gen(function* () {
     );
   return MonolithIndexService.of({
     index: (input) => mapError("index", index(input)),
+    awaitIdle: (input) => mapError("status", awaitIdle(input)),
     status: (input) => mapError("status", status(input)),
     checkFileCached: (input) => mapError("check", checkFileCached(input)),
   });

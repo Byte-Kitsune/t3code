@@ -25,9 +25,10 @@ export function fileAnalyzerDiagnostics(
   return diagnostics.filter(
     (diagnostic) =>
       diagnostic.path.replaceAll("\\", "/").replace(/^\.\//, "") === normalizedPath &&
-      Number.isInteger(diagnostic.line) &&
-      diagnostic.line >= 1 &&
-      diagnostic.line <= lineCount,
+      (diagnostic.line === undefined ||
+        (Number.isInteger(diagnostic.line) &&
+          diagnostic.line >= 1 &&
+          diagnostic.line <= lineCount)),
   );
 }
 
@@ -46,6 +47,8 @@ export function mergeFileAnalyzerAnnotations(
   const byLine = new Map<number, LineAnnotation<FileAnalyzerAnnotationGroup>>();
   for (const comment of comments) byLine.set(comment.lineNumber, { ...comment });
   for (const diagnostic of diagnostics) {
+    if (diagnostic.line === undefined || !Number.isInteger(diagnostic.line) || diagnostic.line < 1)
+      continue;
     const current = byLine.get(diagnostic.line);
     byLine.set(diagnostic.line, {
       lineNumber: diagnostic.line,

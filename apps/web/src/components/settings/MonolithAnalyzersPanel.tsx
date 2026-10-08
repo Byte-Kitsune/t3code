@@ -128,7 +128,17 @@ export function MonolithAnalyzersPanel({
             {area.tools.map((tool) => (
               <div key={`${tool.tool}:${tool.manifestPath}`} className="space-y-2">
                 <p>
-                  <span className="font-medium">{tool.tool === "mago" ? "Mago" : "Biome"}</span> ·{" "}
+                  <span className="font-medium">
+                    {
+                      {
+                        mago: "Mago",
+                        biome: "Biome",
+                        eslint: "ESLint",
+                        depcruise: "dependency-cruiser",
+                      }[tool.tool]
+                    }
+                  </span>{" "}
+                  ·{" "}
                   {tool.tool === "mago" &&
                   areas.areas.find((entry) => entry.id === area.areaId)?.magoDocker
                     ? "Docker Compose"

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
-import { normalizePhpEntryInsightsReport } from "./PhpEntryInsights.ts";
+import {
+  normalizePhpEntryInsightsReport,
+  preparePhpEntryInsightsReport,
+} from "./PhpEntryInsights.ts";
 function graph(options: { complete?: boolean; depth?: number; unknown?: string[] } = {}) {
   return {
     status: "snapshot",
@@ -336,5 +339,69 @@ describe("full PHP entry call graph", () => {
       ),
     ).toEqual({ status: "unsupported", message: "Upgrade extension", targets: [] });
     expect(normalizePhpEntryInsightsReport(graph(), "src/Foo.php").status).toBe("unavailable");
+  });
+});
+
+describe("prepared source graph selection", () => {
+  it("validates once and selects many files without rereading the mutable source graph", () => {
+    const report = graph();
+    let nodeReads = 0;
+    const originalNodes = report.snapshot.nodes;
+    Object.defineProperty(report.snapshot, "nodes", {
+      get() {
+        nodeReads++;
+        return originalNodes;
+      },
+      configurable: true,
+    });
+    const select = preparePhpEntryInsightsReport(report, "artifact/api");
+    const expected = select("src/Repository.php");
+    const readsAfterPreparation = nodeReads;
+    for (let index = 0; index < 100; index++) {
+      expect(select("src/Repository.php")).toEqual(expected);
+      expect(select("src/Controller.php").targets[0]?.symbol).toBe("App\\Controller::index");
+      expect(select("src/absent.php").status).toBe("unavailable");
+    }
+    expect(nodeReads).toBe(readsAfterPreparation);
+    report.snapshot.complete = false;
+    report.snapshot.edges.length = 0;
+    originalNodes[0]!.symbol = "Mutated";
+    report.snapshot.unknown.push("Mutated unknown");
+    expect(select("src/Repository.php")).toEqual(expected);
+  });
+  it("preserves original metadata order when selecting opened and referenced declarations", () => {
+    const report = graph();
+    const metadata = (symbol: string, path: string, kind = "class") => ({
+      symbol,
+      path,
+      kind,
+      line: 1,
+      column: 1,
+      annotations: [],
+    });
+    Object.assign(report.snapshot, {
+      symbol_metadata: [
+        metadata("App\\Controller", "src/Controller.php"),
+        metadata("App\\Repository::find", "src/Repository.php", "method"),
+        metadata("App\\Unused", "src/Unused.php"),
+        metadata("App\\Service", "src/Service.php"),
+      ],
+      annotation_sites: [],
+      comment_column_encoding: "utf8_bytes",
+    });
+    const select = preparePhpEntryInsightsReport(report, "api");
+    expect(select("src/Repository.php").symbolMetadata?.map((item) => item.symbol)).toEqual([
+      "App\\Controller",
+      "App\\Repository::find",
+      "App\\Service",
+    ]);
+    expect(select("src/Unused.php").symbolMetadata?.map((item) => item.symbol)).toEqual([
+      "App\\Unused",
+    ]);
+  });
+  it("validates malformed unselected graph data during preparation", () => {
+    const report = graph();
+    report.snapshot.nodes.push({ ...report.snapshot.nodes[0]! });
+    expect(() => preparePhpEntryInsightsReport(report)).toThrow("Duplicate graph node");
   });
 });

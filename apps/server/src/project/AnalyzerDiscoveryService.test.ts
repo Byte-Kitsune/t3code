@@ -192,6 +192,194 @@ it.layer(layerTest)("AnalyzerDiscoveryService", (it) => {
       }),
   );
 
+  it.effect(
+    "ignores unrelated recipe text and extracts a standalone Biome command from quality chains",
+    () =>
+      Effect.gen(function* () {
+        const root = yield* temporaryRoot;
+        const service = yield* AnalyzerDiscoveryService.AnalyzerDiscoveryService;
+        yield* write(root, "ui/package.json", {
+          devDependencies: { "@biomejs/biome": "*" },
+          scripts: {
+            build: "vite build && echo biome",
+            prepare: 'echo "biome check . && biome check ." && node scripts/setup.js',
+            echo: "echo biome check .",
+            docs: "curl https://example.com/biome.json > quality.json",
+            otherTool: "mago analyze && echo done",
+            lint: "biome --config-path quality check . && tsc --noEmit",
+            lintNpx: "npx @biomejs/biome check . && tsc --noEmit",
+          },
+        });
+        yield* write(root, "ui/quality/biome.json", "{}");
+        yield* write(root, "ui/node_modules/.bin/biome", "binary");
+        const result = (yield* service.discover({ cwd: root, areas: [area("react", "ui")] }))[0]!;
+        expect(result.warnings).toEqual([]);
+        expect(result.tools[0]).toMatchObject({
+          available: true,
+          configPath: "ui/quality/biome.json",
+        });
+        expect(result.tools[0]!.scripts.map((script) => script.name)).toEqual(["lint", "lintNpx"]);
+      }),
+  );
+
+  it.effect(
+    "keeps one warning for ambiguous or dynamic Biome recipes without blocking the installed binary",
+    () =>
+      Effect.gen(function* () {
+        const root = yield* temporaryRoot;
+        const service = yield* AnalyzerDiscoveryService.AnalyzerDiscoveryService;
+        yield* write(root, "ui/package.json", {
+          devDependencies: { "@biomejs/biome": "*" },
+          scripts: {
+            lint: "pnpm exec biome --config-path $CONFIG check .",
+            another: "biome check . && biome --config-path other check .",
+            changedDirectory: "cd nested && biome check .",
+          },
+        });
+        yield* write(root, "ui/biome.json", "{}");
+        yield* write(root, "ui/node_modules/.bin/biome", "binary");
+        const result = (yield* service.discover({ cwd: root, areas: [area("react", "ui")] }))[0]!;
+        expect(result.warnings).toEqual([
+          { path: "ui/package.json", reason: "unsupported_script" },
+        ]);
+        expect(result.tools[0]).toMatchObject({
+          available: true,
+          configPath: "ui/biome.json",
+          scripts: [],
+        });
+      }),
+  );
+
+  it.effect("reads Biome metadata from the application's check and chained CI scripts", () =>
+    Effect.gen(function* () {
+      const root = yield* temporaryRoot;
+      const service = yield* AnalyzerDiscoveryService.AnalyzerDiscoveryService;
+      yield* write(root, "ui/package.json", {
+        devDependencies: { "@biomejs/biome": "*" },
+        scripts: {
+          build: "react-router build",
+          typecheck: "react-router typegen && tsc",
+          architecture: "depcruise src",
+          check: "biome check",
+          "check:fix": "biome check --write",
+          ci: "react-router typegen && biome ci && pnpm run lint:css && pnpm run typecheck && pnpm run architecture:check && pnpm run lint:architecture && pnpm run knip",
+          "fix:all": "react-router typegen && pnpm run check:fix && pnpm run lint:css",
+        },
+      });
+      yield* write(root, "ui/biome.json", "{}");
+      yield* write(root, "ui/node_modules/.bin/biome", "binary");
+      const result = (yield* service.discover({ cwd: root, areas: [area("react", "ui")] }))[0]!;
+      expect(result.warnings).toEqual([]);
+      expect(result.tools[0]).toMatchObject({ available: true, configPath: "ui/biome.json" });
+      expect(result.tools[0]!.scripts.map(({ name, operation }) => ({ name, operation }))).toEqual([
+        { name: "check", operation: "check" },
+        { name: "check:fix", operation: "check" },
+        { name: "ci", operation: "check" },
+      ]);
+    }),
+  );
+
+  it.effect(
+    "discovers all React analyzers with app config and source paths while binaries are hoisted",
+    () =>
+      Effect.gen(function* () {
+        const root = yield* temporaryRoot;
+        const service = yield* AnalyzerDiscoveryService.AnalyzerDiscoveryService;
+        yield* write(root, "package.json", {
+          devDependencies: { "@biomejs/biome": "*", eslint: "*", "dependency-cruiser": "*" },
+        });
+        yield* write(root, "artifact/ui/package.json", {
+          dependencies: { react: "*" },
+          scripts: {
+            check: "biome check",
+            lint: "pnpm exec eslint --config quality/eslint.config.mjs app && tsc --noEmit",
+            architecture: "depcruise -c quality/cruiser.cjs -T json app shared",
+          },
+        });
+        yield* write(root, "artifact/ui/biome.json", "{}");
+        yield* write(root, "artifact/ui/quality/eslint.config.mjs", "export default []");
+        yield* write(root, "artifact/ui/quality/cruiser.cjs", "module.exports={}");
+        for (const tool of ["biome", "eslint", "depcruise"])
+          yield* write(root, `node_modules/.bin/${tool}`, "binary");
+        const result = (yield* service.discover({
+          cwd: root,
+          areas: [area("react", "artifact/ui")],
+        }))[0]!;
+        expect(result.warnings).toEqual([]);
+        expect(result.tools.map((tool) => tool.tool)).toEqual(["biome", "eslint", "depcruise"]);
+        expect(
+          result.tools.every((tool) => tool.available && tool.workingDirectory === "artifact/ui"),
+        ).toBe(true);
+        expect(result.tools[1]).toMatchObject({
+          binaryPath: "node_modules/.bin/eslint",
+          configPath: "artifact/ui/quality/eslint.config.mjs",
+        });
+        expect(result.tools[2]).toMatchObject({
+          binaryPath: "node_modules/.bin/depcruise",
+          configPath: "artifact/ui/quality/cruiser.cjs",
+        });
+        expect(result.tools[2]!.scripts[0]).toMatchObject({
+          operation: "check",
+          sourcePaths: ["artifact/ui/app", "artifact/ui/shared"],
+        });
+      }),
+  );
+
+  it.effect("detects default ESLint and dependency-cruiser configs independently of Biome", () =>
+    Effect.gen(function* () {
+      const root = yield* temporaryRoot;
+      const service = yield* AnalyzerDiscoveryService.AnalyzerDiscoveryService;
+      yield* write(root, "ui/package.json", {
+        devDependencies: { eslint: "*", "dependency-cruiser": "*" },
+        scripts: { architecture: "dependency-cruiser app" },
+      });
+      yield* write(root, "ui/eslint.config.ts", "export default []");
+      yield* write(root, "ui/.dependency-cruiser.cjs", "module.exports={}");
+      yield* write(root, "ui/node_modules/.bin/eslint", "binary");
+      const result = (yield* service.discover({ cwd: root, areas: [area("react", "ui")] }))[0]!;
+      expect(result.tools).toHaveLength(2);
+      expect(result.tools[0]).toMatchObject({
+        tool: "eslint",
+        available: true,
+        configPath: "ui/eslint.config.ts",
+      });
+      expect(result.tools[1]).toMatchObject({
+        tool: "depcruise",
+        available: false,
+        configPath: "ui/.dependency-cruiser.cjs",
+      });
+      expect(result.tools[1]!.scripts[0]?.sourcePaths).toEqual(["ui/app"]);
+    }),
+  );
+
+  it.effect("does not warn about dependency graph exports beside a clear architecture check", () =>
+    Effect.gen(function* () {
+      const root = yield* temporaryRoot;
+      const service = yield* AnalyzerDiscoveryService.AnalyzerDiscoveryService;
+      yield* write(root, "ui/package.json", {
+        devDependencies: { "dependency-cruiser": "*", eslint: "*" },
+        scripts: {
+          "architecture:check": "depcruise app --config .dependency-cruiser.cjs",
+          "architecture:graph":
+            "depcruise app --config .dependency-cruiser.cjs --output-type dot > dependency-graph.dot",
+          "architecture:mermaid": "depcruise app -c .dependency-cruiser.cjs -T mermaid > graph.mmd",
+          "architecture:html": "depcruise app --output-type=html --output-to graph.html",
+          "fix:all":
+            "react-router typegen && pnpm run check:fix && pnpm run lint:eslint && pnpm run architecture:check",
+        },
+      });
+      yield* write(root, "ui/.dependency-cruiser.cjs", "module.exports={}");
+      yield* write(root, "ui/node_modules/.bin/depcruise", "binary");
+      const result = (yield* service.discover({ cwd: root, areas: [area("react", "ui")] }))[0]!;
+      expect(result.warnings).toEqual([]);
+      expect(
+        result.tools
+          .find((tool) => tool.tool === "depcruise")
+          ?.scripts.map((script) => script.name),
+      ).toEqual(["architecture:check"]);
+    }),
+  );
+
   it.effect("finds normal Mago config and reports a declared but uninstalled binary", () =>
     Effect.gen(function* () {
       const root = yield* temporaryRoot;

@@ -167,21 +167,18 @@ function metadata(snapshot: Record<string, unknown>, prefix: string) {
   return { symbols, sites };
 }
 
-/** One deterministic shortest chain per configured entry and target service variant. */
-export function normalizePhpEntryInsightsReport(
+/** Validate one immutable source snapshot and prepare indexes for many file selections. */
+export function preparePhpEntryInsightsReport(
   value: unknown,
-  openedAreaRelativePath: string,
   areaRepoPrefix = "",
-): PhpEntryInsights {
+): (openedAreaRelativePath: string) => PhpEntryInsights {
   const report = object(value);
   if (report.status !== "snapshot") {
     if (!["unavailable", "unsupported", "failed"].includes(String(report.status)))
       throw new Error("Unexpected graph insight status.");
-    return {
-      status: report.status as "unavailable" | "unsupported" | "failed",
-      message: text(report.message),
-      targets: [],
-    };
+    const status = report.status as "unavailable" | "unsupported" | "failed";
+    const message = text(report.message);
+    return () => ({ status, message, targets: [] });
   }
   const snapshot = object(report.snapshot);
   if (
@@ -192,7 +189,6 @@ export function normalizePhpEntryInsightsReport(
     throw new Error("Unsupported full source graph.");
   const maxDepth = position(snapshot.max_depth);
   if (maxDepth > 64) throw new Error("Graph depth exceeds work bounds.");
-  relativePath(openedAreaRelativePath);
   const prefix =
     areaRepoPrefix === "" || areaRepoPrefix === "." ? "" : `${relativePath(areaRepoPrefix)}/`;
   if (
@@ -200,7 +196,27 @@ export function normalizePhpEntryInsightsReport(
     snapshot.comment_column_encoding !== "utf8_bytes"
   )
     throw new Error("Unsupported annotation column encoding.");
+  const snapshotComplete = snapshot.complete;
+  const columnEncoding = snapshot.comment_column_encoding;
   const annotationMetadata = metadata(snapshot, prefix);
+  type IndexedMetadata = { readonly item: MonolithSymbolMetadata; readonly ordinal: number };
+  const metadataByPath = new Map<string, IndexedMetadata[]>();
+  const metadataBySymbol = new Map<string, IndexedMetadata[]>();
+  const sitesByPath = new Map<string, MonolithAnnotationSite[]>();
+  for (const [ordinal, item] of (annotationMetadata.symbols ?? []).entries()) {
+    const indexed = { item, ordinal };
+    const byPath = metadataByPath.get(item.path) ?? [];
+    byPath.push(indexed);
+    metadataByPath.set(item.path, byPath);
+    const bySymbol = metadataBySymbol.get(item.symbol) ?? [];
+    bySymbol.push(indexed);
+    metadataBySymbol.set(item.symbol, bySymbol);
+  }
+  for (const item of annotationMetadata.sites ?? []) {
+    const bucket = sitesByPath.get(item.path) ?? [];
+    bucket.push(item);
+    sitesByPath.set(item.path, bucket);
+  }
   const nodes = new Map<string, GraphNode>();
   for (const value of list(snapshot.nodes, 50_000)) {
     const node = object(value);
@@ -216,6 +232,14 @@ export function normalizePhpEntryInsightsReport(
       serviceId: node.service_id == null ? null : text(node.service_id, 512),
     });
   }
+  const nodesByPath = new Map<string, GraphNode[]>();
+  for (const node of nodes.values()) {
+    const bucket = nodesByPath.get(node.path) ?? [];
+    bucket.push(node);
+    nodesByPath.set(node.path, bucket);
+  }
+  for (const bucket of nodesByPath.values())
+    bucket.sort((a, b) => a.line - b.line || a.id.localeCompare(b.id));
   const reverse = new Map<string, GraphEdge[]>();
   for (const value of list(snapshot.edges, 250_000)) {
     const edge = object(value);
@@ -239,115 +263,133 @@ export function normalizePhpEntryInsightsReport(
     line: node.line,
     column: node.column,
   });
-  const selected = [...nodes.values()]
-    .filter((node) => node.path === openedAreaRelativePath)
-    .sort((a, b) => a.line - b.line || a.id.localeCompare(b.id));
-  const openedPath = `${prefix}${openedAreaRelativePath}`;
-  const openedMetadata = annotationMetadata.symbols?.filter((item) => item.path === openedPath);
-  const openedSites = annotationMetadata.sites?.filter((item) => item.path === openedPath);
-  if (selected.length === 0 && !openedMetadata?.length && !openedSites?.length)
-    return {
-      status: "unavailable",
-      message: "The opened file has no uniquely modeled method in the source graph.",
-      targets: [],
-    };
-  const targets: PhpEntryTarget[] = [];
-  let traversalVisits = 0;
-  // Multiple service variants keep independent reverse searches; collapsing them
-  // into a class would invent paths between incompatible constructor bindings.
-  for (const target of selected.slice(0, 256)) {
-    const direct = new Map<string, PhpEntryLocation>();
-    for (const edge of reverse.get(target.id) ?? []) {
-      const caller = nodes.get(edge.from)!;
-      const item = { ...location(caller), line: edge.line, column: edge.column };
-      direct.set(`${item.id}:${item.path}:${item.line}:${item.column}`, item);
-    }
-    const queue: { id: string; chain: readonly string[] }[] = [
-      { id: target.id, chain: [target.id] },
-    ];
-    const seen = new Set([target.id]);
-    const entries: PhpEntryChain[] = [];
-    const cycles = new Set<string>();
-    let truncated = unknown.length > 200 || direct.size > 500 || selected.length > 256;
-    for (let index = 0; index < queue.length; index++) {
-      if (++traversalVisits > 250_000) {
-        truncated = true;
-        break;
+  return (openedAreaRelativePath) => {
+    relativePath(openedAreaRelativePath);
+    const selected = nodesByPath.get(openedAreaRelativePath) ?? [];
+    const openedPath = `${prefix}${openedAreaRelativePath}`;
+    const openedMetadata =
+      annotationMetadata.symbols === undefined ? undefined : (metadataByPath.get(openedPath) ?? []);
+    const openedSites =
+      annotationMetadata.sites === undefined ? undefined : (sitesByPath.get(openedPath) ?? []);
+    if (selected.length === 0 && !openedMetadata?.length && !openedSites?.length)
+      return {
+        status: "unavailable",
+        message: "The opened file has no uniquely modeled method in the source graph.",
+        targets: [],
+      };
+    const targets: PhpEntryTarget[] = [];
+    let traversalVisits = 0;
+    // Multiple service variants keep independent reverse searches; collapsing them
+    // into a class would invent paths between incompatible constructor bindings.
+    for (const target of selected.slice(0, 256)) {
+      const direct = new Map<string, PhpEntryLocation>();
+      for (const edge of reverse.get(target.id) ?? []) {
+        const caller = nodes.get(edge.from)!;
+        const item = { ...location(caller), line: edge.line, column: edge.column };
+        direct.set(`${item.id}:${item.path}:${item.line}:${item.column}`, item);
       }
-      const current = queue[index]!;
-      const node = nodes.get(current.id)!;
-      if (node.entryScope !== null) {
-        if (entries.length >= 200) {
+      const queue: { id: string; chain: readonly string[] }[] = [
+        { id: target.id, chain: [target.id] },
+      ];
+      const seen = new Set([target.id]);
+      const entries: PhpEntryChain[] = [];
+      const cycles = new Set<string>();
+      let truncated = unknown.length > 200 || direct.size > 500 || selected.length > 256;
+      for (let index = 0; index < queue.length; index++) {
+        if (++traversalVisits > 250_000) {
           truncated = true;
           break;
         }
-        entries.push({
-          entry: location(node),
-          chain: current.chain.map((id) => location(nodes.get(id)!)),
-          evidence: "call",
-          complete: snapshot.complete,
-        });
+        const current = queue[index]!;
+        const node = nodes.get(current.id)!;
+        if (node.entryScope !== null) {
+          if (entries.length >= 200) {
+            truncated = true;
+            break;
+          }
+          entries.push({
+            entry: location(node),
+            chain: current.chain.map((id) => location(nodes.get(id)!)),
+            evidence: "call",
+            complete: snapshotComplete,
+          });
+        }
+        const incoming = reverse.get(current.id) ?? [];
+        for (const edge of incoming) {
+          const cycleIndex = current.chain.indexOf(edge.from);
+          if (cycleIndex < 0) continue;
+          const symbols = [
+            edge.from,
+            ...current.chain.slice(0, cycleIndex).toReversed(),
+            edge.from,
+          ].map((id) => nodes.get(id)!.symbol);
+          if (cycles.size <= 32) cycles.add(`Call cycle: ${symbols.join(" → ")}`);
+          else truncated = true;
+        }
+        if (cycles.size > 32) truncated = true;
+        if (current.chain.length - 1 >= maxDepth) {
+          if (incoming.some((edge) => !seen.has(edge.from))) truncated = true;
+          continue;
+        }
+        for (const edge of incoming) {
+          if (seen.has(edge.from)) continue;
+          seen.add(edge.from);
+          queue.push({ id: edge.from, chain: [edge.from, ...current.chain] });
+        }
       }
-      const incoming = reverse.get(current.id) ?? [];
-      for (const edge of incoming) {
-        const cycleIndex = current.chain.indexOf(edge.from);
-        if (cycleIndex < 0) continue;
-        const symbols = [
-          edge.from,
-          ...current.chain.slice(0, cycleIndex).toReversed(),
-          edge.from,
-        ].map((id) => nodes.get(id)!.symbol);
-        if (cycles.size <= 32) cycles.add(`Call cycle: ${symbols.join(" → ")}`);
-        else truncated = true;
-      }
-      if (cycles.size > 32) truncated = true;
-      if (current.chain.length - 1 >= maxDepth) {
-        if (incoming.some((edge) => !seen.has(edge.from))) truncated = true;
-        continue;
-      }
-      for (const edge of incoming) {
-        if (seen.has(edge.from)) continue;
-        seen.add(edge.from);
-        queue.push({ id: edge.from, chain: [edge.from, ...current.chain] });
-      }
+      targets.push({
+        ...location(target),
+        directCallers: [...direct.values()].slice(0, 500),
+        entries: entries.map((entry) => ({ ...entry, complete: entry.complete && !truncated })),
+        unknown: unknown.slice(0, 200),
+        cycles: [...cycles].slice(0, 32),
+        truncated,
+      });
     }
-    targets.push({
-      ...location(target),
-      directCallers: [...direct.values()].slice(0, 500),
-      entries: entries.map((entry) => ({ ...entry, complete: entry.complete && !truncated })),
-      unknown: unknown.slice(0, 200),
-      cycles: [...cycles].slice(0, 32),
-      truncated,
-    });
-  }
-  const referencedSymbols = new Set(
-    targets.flatMap((target) => [
-      target.symbol,
-      ...target.directCallers.map((caller) => caller.symbol),
-      ...target.entries.flatMap((entry) => entry.chain.map((node) => node.symbol)),
-    ]),
-  );
-  // Class-level comments also accompany returned methods on the graph.
-  for (const symbol of referencedSymbols) {
-    const separator = symbol.lastIndexOf("::");
-    if (separator > 0) referencedSymbols.add(symbol.slice(0, separator));
-  }
-  const selectedMetadata = annotationMetadata.symbols?.filter(
-    (item) => item.path === openedPath || referencedSymbols.has(item.symbol),
-  );
-  const annotationsTruncated =
-    (selectedMetadata?.length ?? 0) > 4096 || (openedSites?.length ?? 0) > 4096;
-  const complete =
-    snapshot.complete && !annotationsTruncated && targets.every((target) => !target.truncated);
-  return {
-    status: complete ? "complete" : "incomplete",
-    targets,
-    ...(snapshot.comment_column_encoding === undefined
-      ? {}
-      : { commentColumnEncoding: "utf8_bytes" as const }),
-    ...(selectedMetadata === undefined ? {} : { symbolMetadata: selectedMetadata.slice(0, 4096) }),
-    ...(openedSites === undefined ? {} : { annotationSites: openedSites.slice(0, 4096) }),
-    message:
-      "One shortest call chain per configured entry and method/service variant; entry scopes are static configuration, not proof of a runtime request.",
+    const referencedSymbols = new Set(
+      targets.flatMap((target) => [
+        target.symbol,
+        ...target.directCallers.map((caller) => caller.symbol),
+        ...target.entries.flatMap((entry) => entry.chain.map((node) => node.symbol)),
+      ]),
+    );
+    // Class-level comments also accompany returned methods on the graph.
+    for (const symbol of referencedSymbols) {
+      const separator = symbol.lastIndexOf("::");
+      if (separator > 0) referencedSymbols.add(symbol.slice(0, separator));
+    }
+    const relevantMetadata = new Map<number, MonolithSymbolMetadata>();
+    for (const indexed of openedMetadata ?? []) relevantMetadata.set(indexed.ordinal, indexed.item);
+    for (const symbol of referencedSymbols)
+      for (const indexed of metadataBySymbol.get(symbol) ?? [])
+        relevantMetadata.set(indexed.ordinal, indexed.item);
+    const selectedMetadata =
+      annotationMetadata.symbols === undefined
+        ? undefined
+        : [...relevantMetadata].sort(([a], [b]) => a - b).map(([, item]) => item);
+    const annotationsTruncated =
+      (selectedMetadata?.length ?? 0) > 4096 || (openedSites?.length ?? 0) > 4096;
+    const complete =
+      snapshotComplete && !annotationsTruncated && targets.every((target) => !target.truncated);
+    return {
+      status: complete ? "complete" : "incomplete",
+      targets,
+      ...(columnEncoding === undefined ? {} : { commentColumnEncoding: "utf8_bytes" as const }),
+      ...(selectedMetadata === undefined
+        ? {}
+        : { symbolMetadata: selectedMetadata.slice(0, 4096) }),
+      ...(openedSites === undefined ? {} : { annotationSites: openedSites.slice(0, 4096) }),
+      message:
+        "One shortest call chain per configured entry and method/service variant; entry scopes are static configuration, not proof of a runtime request.",
+    };
   };
+}
+
+/** One deterministic shortest chain per configured entry and target service variant. */
+export function normalizePhpEntryInsightsReport(
+  value: unknown,
+  openedAreaRelativePath: string,
+  areaRepoPrefix = "",
+): PhpEntryInsights {
+  return preparePhpEntryInsightsReport(value, areaRepoPrefix)(openedAreaRelativePath);
 }

@@ -1,3 +1,5 @@
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -51,6 +53,105 @@ function serviceLayer(
   );
 }
 const passed = () => Effect.succeed({ diagnostics: [], exitCode: 0, status: "passed" as const });
+
+it.effect(
+  "indexes all installed React analyzers and keeps run counts isolated per tool and file",
+  () =>
+    Effect.gen(function* () {
+      const root = yield* setup;
+      yield* write(
+        root,
+        ".t3/monolith.json",
+        JSON.stringify({
+          version: 1,
+          initialized: true,
+          areas: [{ id: "ui", name: "UI", path: "ui", kind: "react" }],
+        }),
+      );
+      yield* write(
+        root,
+        "ui/package.json",
+        JSON.stringify({
+          devDependencies: {
+            "@biomejs/biome": "*",
+            eslint: "*",
+            "dependency-cruiser": "*",
+          },
+          scripts: {
+            check: "biome check",
+            "lint:architecture": 'pnpm exec eslint "app/**/*.js"',
+            "architecture:check": "depcruise app --config .dependency-cruiser.cjs",
+          },
+        }),
+      );
+      for (const tool of ["biome", "eslint", "depcruise"])
+        yield* write(root, `ui/node_modules/.bin/${tool}`, "fixture");
+      yield* write(root, "ui/.dependency-cruiser.cjs", "module.exports = {};\n");
+      yield* write(root, "ui/app/A.js", "export const a = 1;\n");
+      yield* write(root, "ui/app/B.js", "export const b = 2;\n");
+      const calls: AnalyzerExecution.AnalyzerExecutionInput[] = [];
+      const files = yield* Effect.flatMap(
+        MonolithAnalyzerService.MonolithAnalyzerService,
+        (service) =>
+          service.indexArea({
+            cwd: root,
+            areaId: "ui",
+            paths: ["ui/package.json", "ui/app/A.js", "ui/app/B.js"],
+          }),
+      ).pipe(
+        Effect.provide(
+          serviceLayer((input) => {
+            calls.push(input);
+            const diagnostics: AnalyzerExecution.AnalyzerDiagnostic[] =
+              input.tool === "eslint"
+                ? [
+                    {
+                      path: "ui/app/A.js",
+                      line: 1,
+                      column: 1,
+                      severity: "error",
+                      message: "Unused",
+                      ruleId: "no-unused-vars",
+                      tool: "eslint",
+                      operation: "check",
+                    },
+                  ]
+                : input.tool === "depcruise"
+                  ? [
+                      {
+                        path: "ui/app/B.js",
+                        severity: "error",
+                        message: "Cross layer",
+                        ruleId: "architecture",
+                        tool: "depcruise",
+                        operation: "check",
+                      },
+                    ]
+                  : [];
+            return Effect.succeed({
+              diagnostics,
+              exitCode: diagnostics.length ? 1 : 0,
+              status: diagnostics.length ? ("findings" as const) : ("passed" as const),
+            });
+          }),
+        ),
+      );
+      expect(calls.map((call) => call.tool)).toEqual(["biome", "eslint", "depcruise"]);
+      expect(calls.find((call) => call.tool === "depcruise")?.sourcePaths).toEqual([
+        `${root}/ui/app`,
+      ]);
+      expect(
+        files.find((file) => file.path === "ui/package.json")?.result.runs.map((run) => run.tool),
+      ).toEqual(["biome"]);
+      const a = files.find((file) => file.path === "ui/app/A.js")!.result;
+      const b = files.find((file) => file.path === "ui/app/B.js")!.result;
+      expect(a.runs.find((run) => run.tool === "eslint")?.diagnosticCount).toBe(1);
+      expect(a.runs.find((run) => run.tool === "depcruise")?.status).toBe("passed");
+      expect(b.runs.find((run) => run.tool === "eslint")?.status).toBe("passed");
+      expect(b.runs.find((run) => run.tool === "depcruise")?.diagnosticCount).toBe(1);
+      expect(b.diagnostics[0]?.line).toBeUndefined();
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
 
 it.effect(
   "runs all PHP checks against the application root and returns the persisted revision",
@@ -602,5 +703,48 @@ it.effect("loads the tools SDK autoloader for a Symfony-only configuration check
       ),
     );
     expect(calls[0]?.autoloadPaths).toContain(`${root}/app/tools/vendor/autoload.php`);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("reserves opened-file capacity while background batches are blocked and queued", () =>
+  Effect.gen(function* () {
+    const root = yield* setup;
+    yield* write(root, "app/src/Foreground.php", "<?php class Foreground {}\n");
+    const started = yield* Deferred.make<void>();
+    const queued = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    let backgroundStarts = 0;
+    yield* Effect.gen(function* () {
+      const service = yield* MonolithAnalyzerService.MonolithAnalyzerService;
+      const background = () =>
+        service.indexArea({ cwd: root, areaId: "php:app", paths: ["app/src/Test.php"] });
+      const first = yield* background().pipe(Effect.forkChild);
+      yield* Deferred.await(started);
+      const second = yield* Effect.gen(function* () {
+        yield* Deferred.succeed(queued, undefined);
+        return yield* background();
+      }).pipe(Effect.forkChild);
+      yield* Deferred.await(queued);
+      const opened = yield* service.checkFile({ cwd: root, path: "app/src/Foreground.php" });
+      expect(opened.runs.map((run) => run.status)).toEqual(["passed", "passed", "passed"]);
+      expect(backgroundStarts).toBe(1);
+      yield* Deferred.succeed(release, undefined);
+      expect((yield* Fiber.join(first))[0]?.path).toBe("app/src/Test.php");
+      expect((yield* Fiber.join(second))[0]?.path).toBe("app/src/Test.php");
+      expect(backgroundStarts).toBe(2);
+    }).pipe(
+      Effect.provide(
+        serviceLayer(
+          Effect.fnUntraced(function* (input) {
+            if (input.filePath.endsWith("/Test.php") && input.operation === "format") {
+              backgroundStarts++;
+              yield* Deferred.succeed(started, undefined);
+              yield* Deferred.await(release);
+            }
+            return { diagnostics: [], exitCode: 0, status: "passed" as const };
+          }),
+        ),
+      ),
+    );
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

@@ -68,8 +68,17 @@ function serviceLayer(
     MonolithAnalyzerService.MonolithAnalyzerError,
     Crypto.Crypto | FileSystem.FileSystem | Path.Path
   >,
-  checkFile: MonolithAnalyzerService.MonolithAnalyzerService["Service"]["checkFile"] = () =>
-    Effect.die("Unexpected per-file analyzer execution"),
+  checkFile: MonolithAnalyzerService.MonolithAnalyzerService["Service"]["checkFile"] = (input) =>
+    hashFile(input.cwd, input.path).pipe(
+      Effect.map((hash) =>
+        result(
+          getAreas().find((area) => input.path.startsWith(`${area.path}/`))?.id ?? "api",
+          hash,
+        ),
+      ),
+      Effect.orDie,
+      Effect.provide(NodeServices.layer),
+    ),
 ) {
   return Layer.fresh(MonolithIndexService.layer).pipe(
     Layer.provide(
@@ -104,6 +113,149 @@ const indexUse = Effect.gen(function* () {
   return yield* MonolithIndexService.MonolithIndexService;
 });
 
+it.effect.each([
+  {
+    message: "Symfony configuration security inspection was incomplete for one or more files.",
+    expectedStatus: "ready",
+    expectedCalls: 1,
+  },
+  {
+    message: "Symfony configuration security could not inspect this source snapshot.",
+    expectedStatus: "stale",
+    expectedCalls: 2,
+  },
+] as const)(
+  "distinguishes stable incomplete security sources from retryable helper failures: $expectedStatus",
+  ({ message, expectedStatus, expectedCalls }) =>
+    Effect.gen(function* () {
+      const root = yield* setup;
+      let calls = 0;
+      yield* Effect.gen(function* () {
+        const service = yield* indexUse;
+        yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        yield* service.awaitIdle({ cwd: root });
+        yield* TestClock.adjust("31 seconds");
+        expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe(expectedStatus);
+        yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        yield* service.awaitIdle({ cwd: root });
+        const checked = yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        expect(checked.runs[0]?.status).toBe("failed");
+        expect(checked.runs[0]?.message).toBe(message);
+        expect(calls).toBe(expectedCalls);
+      }).pipe(
+        Effect.provide(
+          serviceLayer(
+            () => [php],
+            (input) => {
+              calls++;
+              return batch(input).pipe(
+                Effect.map((files) =>
+                  files.map((entry) => ({
+                    ...entry,
+                    result: {
+                      ...entry.result,
+                      runs: [
+                        {
+                          tool: "mago" as const,
+                          operation: "guard" as const,
+                          status: "failed" as const,
+                          diagnosticCount: 0,
+                          message,
+                        },
+                      ],
+                    },
+                  })),
+                ),
+                Effect.orDie,
+              );
+            },
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "indexes YAML alongside PHP with per-file hashes and invalidates cached configuration findings",
+  () =>
+    Effect.gen(function* () {
+      const root = yield* setup;
+      yield* write(root, "api/config/services.yaml", "parameters: {token: first}\n");
+      yield* write(root, "api/config/packages/security.yml", "security: {}\n");
+      let calls = 0;
+      let paths: readonly string[] = [];
+      yield* Effect.gen(function* () {
+        const service = yield* indexUse;
+        const first = yield* service.checkFileCached({
+          cwd: root,
+          path: "api/config/services.yaml",
+        });
+        yield* service.awaitIdle({ cwd: root });
+        expect(first.revision).toBe(yield* hashFile(root, "api/config/services.yaml"));
+        expect(paths).toContain("api/config/services.yaml");
+        expect(paths).toContain("api/config/packages/security.yml");
+        expect(paths).toContain("api/src/Demo.php");
+        expect(paths).not.toContain("api/composer.json");
+        expect((yield* service.status({ cwd: root })).areas[0]?.fileCount).toBe(4);
+        yield* write(root, "api/config/services.yaml", "parameters: {token: other}\n");
+        expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("stale");
+        const changed = yield* service.checkFileCached({
+          cwd: root,
+          path: "api/config/services.yaml",
+        });
+        yield* service.awaitIdle({ cwd: root });
+        expect(changed.revision).not.toBe(first.revision);
+        expect(calls).toBe(2);
+      }).pipe(
+        Effect.provide(
+          serviceLayer(
+            () => [php],
+            (input) => {
+              paths = input.paths;
+              calls++;
+              return batch(input).pipe(Effect.orDie);
+            },
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "rebuilds older cache versions instead of treating missing YAML metadata as a ready index",
+  () =>
+    Effect.gen(function* () {
+      const root = yield* setup;
+      let calls = 0;
+      const layer = () =>
+        serviceLayer(
+          () => [php],
+          (input) => {
+            calls++;
+            return batch(input).pipe(Effect.orDie);
+          },
+        );
+      yield* Effect.gen(function* () {
+        const service = yield* indexUse;
+        yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        yield* service.awaitIdle({ cwd: root });
+      }).pipe(Effect.provide(layer()));
+      const fs = yield* FileSystem.FileSystem;
+      const directory = `${root}/.t3/monolith-index`;
+      const cachePath = `${directory}/${(yield* fs.readDirectory(directory))[0]}`;
+      const contents = yield* fs.readFileString(cachePath);
+      expect(contents).toContain('"version":3,');
+      yield* fs.writeFileString(cachePath, contents.replace('"version":3,', '"version":2,'));
+      yield* Effect.gen(function* () {
+        const service = yield* indexUse;
+        expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("idle");
+        yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        yield* service.awaitIdle({ cwd: root });
+      }).pipe(Effect.provide(layer()));
+      expect(calls).toBe(2);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 it.effect(
   "invalidates same-size .env changes beside an automatically detected ancestor Compose file",
   () =>
@@ -116,9 +268,11 @@ it.effect(
       yield* Effect.gen(function* () {
         const service = yield* indexUse;
         yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        yield* service.awaitIdle({ cwd: root });
         yield* write(root, ".env", "APP_MODE=prod\n");
         expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("stale");
         yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        yield* service.awaitIdle({ cwd: root });
         expect(calls).toBe(2);
       }).pipe(
         Effect.provide(
@@ -162,7 +316,7 @@ it.effect(
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
-it.effect("rejects cache outputs above 16 MiB before disk publication or memory reuse", () =>
+it.effect("rejects cache outputs above 64 MiB before disk publication or memory reuse", () =>
   Effect.gen(function* () {
     const root = yield* setup;
     yield* Effect.gen(function* () {
@@ -170,10 +324,11 @@ it.effect("rejects cache outputs above 16 MiB before disk publication or memory 
       const exit = yield* service
         .checkFileCached({ cwd: root, path: "api/src/Demo.php" })
         .pipe(Effect.exit);
-      expect(exit._tag).toBe("Failure");
+      expect(exit._tag).toBe("Success");
+      yield* service.awaitIdle({ cwd: root });
       const status = (yield* service.status({ cwd: root })).areas[0];
       expect(status?.status).toBe("failed");
-      expect(status?.message).toContain("limit");
+      expect(status?.message).toContain("64 MiB");
       const fs = yield* FileSystem.FileSystem;
       expect(yield* fs.exists(`${root}/.t3/monolith-index`)).toBe(false);
     }).pipe(
@@ -196,7 +351,7 @@ it.effect("rejects cache outputs above 16 MiB before disk publication or memory 
                               line: 1,
                               column: 1,
                               severity: "warning" as const,
-                              message: "x".repeat(17 * 1024 * 1024),
+                              message: "x".repeat(65 * 1024 * 1024),
                               ruleId: "large",
                               tool: "mago" as const,
                               operation: "analyze" as const,
@@ -227,6 +382,7 @@ it.effect("coalesces simultaneous cold file opens without a preceding project-in
         ],
         { concurrency: "unbounded" },
       );
+      yield* service.awaitIdle({ cwd: root });
       expect(results).toHaveLength(2);
       expect(calls).toBe(1);
     }).pipe(
@@ -250,11 +406,14 @@ it.effect("retries unavailable tools after the bounded TTL without source change
     yield* Effect.gen(function* () {
       const service = yield* indexUse;
       yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+      yield* service.awaitIdle({ cwd: root });
       yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+      yield* service.awaitIdle({ cwd: root });
       expect(calls).toBe(1);
       yield* TestClock.adjust("31 seconds");
       expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("stale");
       yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+      yield* service.awaitIdle({ cwd: root });
       expect(calls).toBe(2);
     }).pipe(
       Effect.provide(
@@ -294,9 +453,11 @@ it.effect(
       yield* Effect.gen(function* () {
         const service = yield* indexUse;
         yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        yield* service.awaitIdle({ cwd: root });
         yield* TestClock.adjust("31 seconds");
         expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("ready");
         yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        yield* service.awaitIdle({ cwd: root });
         expect(calls).toBe(1);
       }).pipe(
         Effect.provide(
@@ -353,6 +514,7 @@ it.effect(
       yield* Effect.gen(function* () {
         const service = yield* indexUse;
         yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        yield* service.awaitIdle({ cwd: root });
         yield* write(
           root,
           "infrastructure/docker/parts/php.yaml",
@@ -360,9 +522,11 @@ it.effect(
         );
         expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("stale");
         yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        yield* service.awaitIdle({ cwd: root });
         yield* write(root, "infrastructure/docker/.env", "APP_MODE=production\n");
         expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("stale");
         yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        yield* service.awaitIdle({ cwd: root });
         expect(calls).toBe(3);
       }).pipe(
         Effect.provide(
@@ -397,12 +561,14 @@ it.effect(
         const second = yield* service
           .checkFileCached({ cwd: root, path: "api/src/Caller.php" })
           .pipe(Effect.forkChild);
-        yield* Deferred.succeed(release, undefined);
         expect((yield* Fiber.join(first)).revision).toBe(yield* hashFile(root, "api/src/Demo.php"));
         expect((yield* Fiber.join(second)).revision).toBe(
           yield* hashFile(root, "api/src/Caller.php"),
         );
         expect(calls).toBe(1);
+        expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("indexing");
+        yield* Deferred.succeed(release, undefined);
+        yield* service.awaitIdle({ cwd: root });
         const status = yield* service.status({ cwd: root });
         expect(status.areas[0]?.status).toBe("ready");
         expect(status.areas[0]?.fileCount).toBe(2);
@@ -447,10 +613,16 @@ it.effect("reloads a persisted valid cache in a new service without invoking ana
         },
       );
     const first = yield* Effect.gen(function* () {
-      return yield* (yield* indexUse).checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+      const service = yield* indexUse;
+      const checked = yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+      yield* service.awaitIdle({ cwd: root });
+      return checked;
     }).pipe(Effect.provide(layer()));
     const cached = yield* Effect.gen(function* () {
-      return yield* (yield* indexUse).checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+      const service = yield* indexUse;
+      const checked = yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+      yield* service.awaitIdle({ cwd: root });
+      return checked;
     }).pipe(Effect.provide(layer()));
     expect(cached).toEqual(first);
     expect(calls).toBe(1);
@@ -467,17 +639,21 @@ it.effect(
       yield* Effect.gen(function* () {
         const service = yield* indexUse;
         yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        yield* service.awaitIdle({ cwd: root });
         const before = (yield* service.status({ cwd: root })).areas[0]?.revision;
         yield* write(root, "api/src/Caller.php", "<?php class CallEr {}\n");
         expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("stale");
         yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        yield* service.awaitIdle({ cwd: root });
         expect((yield* service.status({ cwd: root })).areas[0]?.revision).not.toBe(before);
         area = { ...php, commentMarkers: [] };
         expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("stale");
         yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        yield* service.awaitIdle({ cwd: root });
         yield* write(root, "api/.mago/container-reference.dev.json", "{}");
         expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("stale");
         yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        yield* service.awaitIdle({ cwd: root });
         expect(calls).toBe(4);
       }).pipe(
         Effect.provide(
@@ -501,7 +677,8 @@ it.effect("rejects stale batch output when source changes during the shared anal
       const exit = yield* service
         .checkFileCached({ cwd: root, path: "api/src/Demo.php" })
         .pipe(Effect.exit);
-      expect(exit._tag).toBe("Failure");
+      expect(exit._tag).toBe("Success");
+      yield* service.awaitIdle({ cwd: root });
       expect((yield* service.status({ cwd: root })).areas[0]?.status).not.toBe("ready");
       const fs = yield* FileSystem.FileSystem;
       expect(yield* fs.exists(`${root}/.t3/monolith-index`)).toBe(false);
@@ -532,6 +709,7 @@ it.effect("indexes React source too while generic and excluded groups do not exe
     yield* Effect.gen(function* () {
       const service = yield* indexUse;
       yield* service.checkFileCached({ cwd: root, path: "portal/src/App.tsx" });
+      yield* service.awaitIdle({ cwd: root });
       expect(paths).toEqual(["portal/package.json", "portal/src/App.tsx"]);
       expect((yield* service.status({ cwd: root })).areas.map((area) => area.areaId)).toEqual([
         "portal",
@@ -561,16 +739,242 @@ it.effect("does not write index caches through a linked .t3 directory", () =>
     const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-index-outside-" });
     yield* fs.symlink(outside, `${root}/.t3`);
     yield* Effect.gen(function* () {
-      const exit = yield* (yield* indexUse)
+      const service = yield* indexUse;
+      const exit = yield* service
         .checkFileCached({ cwd: root, path: "api/src/Demo.php" })
         .pipe(Effect.exit);
-      expect(exit._tag).toBe("Failure");
+      expect(exit._tag).toBe("Success");
+      yield* service.awaitIdle({ cwd: root });
       expect(yield* fs.readDirectory(outside)).toEqual([]);
     }).pipe(
       Effect.provide(
         serviceLayer(
           () => [php],
           (input) => batch(input).pipe(Effect.orDie),
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "indexes 20,001 PHP files in sequential bounded batches",
+  () =>
+    Effect.gen(function* () {
+      const root = yield* setup;
+      yield* Effect.forEach(
+        Array.from({ length: 19999 }, (_, index) => index),
+        (index) => write(root, `api/src/Generated${index}.php`, "<?php class Generated {}\n"),
+        { concurrency: 64, discard: true },
+      );
+      const sizes: number[] = [];
+      let active = 0;
+      yield* Effect.gen(function* () {
+        const service = yield* indexUse;
+        expect((yield* service.index({ cwd: root })).areas[0]?.status).toBe("indexing");
+        yield* service.awaitIdle({ cwd: root });
+        expect(sizes).toHaveLength(11);
+        expect(sizes.reduce((sum, count) => sum + count, 0)).toBe(20001);
+        expect(Math.max(...sizes)).toBeLessThanOrEqual(2000);
+        expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("ready");
+      }).pipe(
+        Effect.provide(
+          serviceLayer(
+            () => [php],
+            (input) =>
+              Effect.gen(function* () {
+                expect(active).toBe(0);
+                active++;
+                sizes.push(input.paths.length);
+                const files = yield* batch(input);
+                active--;
+                return files;
+              }).pipe(Effect.orDie),
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  { timeout: 60000 },
+);
+
+it.effect(
+  "splits batches by UTF-8 bytes before the analyzer's 32 MiB budget",
+  () =>
+    Effect.gen(function* () {
+      const root = yield* setup;
+      const contents = "<?php\n//" + "é".repeat(700000);
+      yield* Effect.forEach(
+        Array.from({ length: 25 }, (_, index) => index),
+        (index) => write(root, `api/src/Large${index}.php`, contents),
+        { concurrency: 8, discard: true },
+      );
+      const sizes: number[] = [];
+      yield* Effect.gen(function* () {
+        const service = yield* indexUse;
+        yield* service.index({ cwd: root });
+        yield* service.awaitIdle({ cwd: root });
+        expect(sizes).toHaveLength(2);
+        expect(Math.max(...sizes)).toBeLessThanOrEqual(32 * 1024 * 1024);
+        expect(sizes.reduce((sum, size) => sum + size, 0)).toBeGreaterThan(32 * 1024 * 1024);
+        expect((yield* service.status({ cwd: root })).areas[0]?.fileCount).toBe(27);
+        expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("ready");
+      }).pipe(
+        Effect.provide(
+          serviceLayer(
+            () => [php],
+            (input) =>
+              Effect.gen(function* () {
+                const fs = yield* FileSystem.FileSystem;
+                const bytes = yield* Effect.forEach(input.paths, (path) =>
+                  fs.stat(`${root}/${path}`).pipe(Effect.map((stat) => Number(stat.size))),
+                );
+                sizes.push(bytes.reduce((sum, size) => sum + size, 0));
+                return yield* batch(input);
+              }).pipe(Effect.orDie),
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  { timeout: 30000 },
+);
+
+it.effect("reports an oversized source precisely while other opened files remain usable", () =>
+  Effect.gen(function* () {
+    const root = yield* setup;
+    yield* write(root, "api/src/Oversized.php", "x".repeat(2 * 1024 * 1024 + 1));
+    let calls = 0;
+    yield* Effect.gen(function* () {
+      const service = yield* indexUse;
+      const opened = yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+      expect(opened.revision).toBe(yield* hashFile(root, "api/src/Demo.php"));
+      yield* service.awaitIdle({ cwd: root });
+      const status = (yield* service.status({ cwd: root })).areas[0];
+      expect(status?.status).toBe("failed");
+      expect(status?.message).toContain("api/src/Oversized.php");
+      expect(status?.message).toContain("2 MiB");
+      expect(calls).toBe(0);
+      expect(
+        (yield* service.checkFileCached({ cwd: root, path: "api/src/Caller.php" })).revision,
+      ).toBe(yield* hashFile(root, "api/src/Caller.php"));
+      yield* service.awaitIdle({ cwd: root });
+      expect(calls).toBe(0);
+    }).pipe(
+      Effect.provide(
+        serviceLayer(
+          () => [php],
+          (input) => {
+            calls++;
+            return batch(input).pipe(Effect.orDie);
+          },
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "bounds cumulative graph entries before serializing a multi-gigabyte area cache",
+  () =>
+    Effect.gen(function* () {
+      const root = yield* setup;
+      yield* Effect.forEach(
+        Array.from({ length: 2001 }, (_, index) => index),
+        (index) => write(root, `api/src/Graph${index}.php`, "<?php class Graph {}\n"),
+        { concurrency: 64, discard: true },
+      );
+      const sharedMessage = "é".repeat(512 * 1024);
+      let calls = 0;
+      yield* Effect.gen(function* () {
+        const service = yield* indexUse;
+        yield* service.index({ cwd: root });
+        yield* service.awaitIdle({ cwd: root });
+        expect((yield* service.status({ cwd: root })).areas[0]?.message).toContain("64 MiB");
+        expect(calls).toBe(1);
+        const fs = yield* FileSystem.FileSystem;
+        expect(yield* fs.exists(`${root}/.t3/monolith-index`)).toBe(false);
+        const opened = yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
+        expect(opened.diagnostics).toEqual([]);
+        expect(calls).toBe(1);
+      }).pipe(
+        Effect.provide(
+          serviceLayer(
+            () => [php],
+            (input) => {
+              calls++;
+              return batch(input).pipe(
+                Effect.map((files) =>
+                  files.map((entry) => ({
+                    ...entry,
+                    result: {
+                      ...entry.result,
+                      diagnostics: [
+                        {
+                          path: entry.path,
+                          line: 1,
+                          column: 1,
+                          severity: "info" as const,
+                          message: sharedMessage,
+                          ruleId: "graph",
+                          tool: "mago" as const,
+                          operation: "analyze" as const,
+                        },
+                      ],
+                    },
+                  })),
+                ),
+                Effect.orDie,
+              );
+            },
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  { timeout: 30000 },
+);
+
+it.effect("invalidates source membership when a nested folder group is added or removed", () =>
+  Effect.gen(function* () {
+    const root = yield* setup;
+    yield* write(root, "api/nested/Owned.php", "<?php class Owned {}\n");
+    let areas: readonly MonolithArea[] = [php];
+    const batches: (readonly string[])[] = [];
+    yield* Effect.gen(function* () {
+      const service = yield* indexUse;
+      yield* service.index({ cwd: root });
+      yield* service.awaitIdle({ cwd: root });
+      const first = (yield* service.status({ cwd: root })).areas[0];
+      expect(first?.fileCount).toBe(3);
+      areas = [php, { id: "nested", name: "Nested", path: "api/nested", kind: "folder" }];
+      const excluded = (yield* service.status({ cwd: root })).areas[0];
+      expect(excluded?.status).toBe("stale");
+      expect(excluded?.revision).not.toBe(first?.revision);
+      yield* service.index({ cwd: root });
+      yield* service.awaitIdle({ cwd: root });
+      const second = (yield* service.status({ cwd: root })).areas[0];
+      expect(second?.fileCount).toBe(2);
+      areas = [php];
+      const included = (yield* service.status({ cwd: root })).areas[0];
+      expect(included?.status).toBe("stale");
+      expect(included?.revision).not.toBe(second?.revision);
+      yield* service.index({ cwd: root });
+      yield* service.awaitIdle({ cwd: root });
+      const final = (yield* service.status({ cwd: root })).areas[0];
+      expect(final?.status).toBe("ready");
+      expect(final?.fileCount).toBe(3);
+      expect(final?.revision).toBe(first?.revision);
+      expect(batches).toHaveLength(3);
+      expect(batches[1]).not.toContain("api/nested/Owned.php");
+      expect(batches[2]).toContain("api/nested/Owned.php");
+      const restored = yield* service.checkFileCached({ cwd: root, path: "api/nested/Owned.php" });
+      expect(restored.revision).toBe(yield* hashFile(root, "api/nested/Owned.php"));
+    }).pipe(
+      Effect.provide(
+        serviceLayer(
+          () => areas,
+          (input) => {
+            batches.push(input.paths);
+            return batch(input).pipe(Effect.orDie);
+          },
         ),
       ),
     );
