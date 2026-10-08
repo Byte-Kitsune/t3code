@@ -1,4 +1,5 @@
 import { EnvironmentId } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { act, StrictMode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
@@ -29,7 +30,11 @@ vi.mock("./projectFilesQueryState", () => ({
 }));
 
 import { setMarkdownTaskChecked } from "./filePreviewMode";
-import { useFileSaveCoordinator } from "./useFileSaveCoordinator";
+import {
+  flushProjectFileSaves,
+  resumeProjectFileSaves,
+  useFileSaveCoordinator,
+} from "./useFileSaveCoordinator";
 
 const environmentId = EnvironmentId.make("save-lifecycle-audit");
 const onPendingChange = vi.fn();
@@ -84,6 +89,111 @@ afterEach(async () => {
 });
 
 describe("file-save React lifecycle", () => {
+  it("failed saves cannot retry on disposal after ownership transfers", async () => {
+    const failed = AsyncResult.failure(Cause.die(new Error("save failed")));
+    writeFile.mockResolvedValue(failed);
+    mount();
+    changeHandler()("unsaved transferred draft");
+    await flushProjectFileSaves(environmentId, "/workspace");
+    expect(writeFile).toHaveBeenCalledOnce();
+    await act(async () => renderer!.unmount());
+    renderer = null;
+    await vi.runAllTimersAsync();
+    expect(writeFile).toHaveBeenCalledOnce();
+    expect(confirmFile).not.toHaveBeenCalled();
+  });
+
+  it("also suspends ownership when a flush throws", async () => {
+    writeFile.mockRejectedValueOnce(new Error("flush write rejected"));
+    mount();
+    changeHandler()("draft retained after exception");
+    await expect(flushProjectFileSaves(environmentId, "/workspace")).rejects.toThrow(
+      "flush write rejected",
+    );
+    await act(async () => renderer!.unmount());
+    renderer = null;
+    await vi.runAllTimersAsync();
+    expect(writeFile).toHaveBeenCalledOnce();
+    expect(confirmFile).not.toHaveBeenCalled();
+  });
+
+  it("resumes a suspended editor after a cancelled handoff", async () => {
+    writeFile.mockResolvedValueOnce(AsyncResult.failure(Cause.die(new Error("first save failed"))));
+    mount();
+    changeHandler()("pending draft");
+    await flushProjectFileSaves(environmentId, "/workspace");
+    changeHandler()("ignored while transferring");
+    await vi.runAllTimersAsync();
+    expect(writeFile).toHaveBeenCalledOnce();
+    resumeProjectFileSaves(environmentId, "/workspace");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(writeFile).toHaveBeenCalledTimes(2);
+    expect(writeFile.mock.calls[1]![0].input.contents).toBe("pending draft");
+    changeHandler()("new edit after cancellation");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(writeFile.mock.calls[2]![0].input.contents).toBe("new edit after cancellation");
+  });
+
+  it("a project handoff waits for a disposed preview's in-flight write", async () => {
+    let finishWrite!: (result: ReturnType<typeof AsyncResult.success<void>>) => void;
+    const write = new Promise<ReturnType<typeof AsyncResult.success<void>>>((resolve) => {
+      finishWrite = resolve;
+    });
+    writeFile.mockReturnValueOnce(write);
+    mount();
+    changeHandler()("pending transfer draft");
+    await vi.advanceTimersByTimeAsync(500);
+    await act(async () => renderer!.unmount());
+    renderer = null;
+
+    let settled = false;
+    const handoff = flushProjectFileSaves(environmentId, "/workspace").then(() => {
+      settled = true;
+    });
+    await flushProjectFileSaves(environmentId, "/unrelated");
+    expect(settled).toBe(false);
+    finishWrite(AsyncResult.success(undefined));
+    await handoff;
+    expect(confirmFile).toHaveBeenCalledWith(
+      environmentId,
+      "/workspace",
+      "file.txt",
+      "pending transfer draft",
+    );
+    expect(settled).toBe(true);
+    expect(writeFile).toHaveBeenCalledOnce();
+  });
+
+  it("a project handoff flushes only the requested environment and root", async () => {
+    mount();
+    changeHandler()("target project draft");
+    await flushProjectFileSaves(EnvironmentId.make("unrelated-environment"), "/workspace");
+    await flushProjectFileSaves(environmentId, "/unrelated");
+    expect(writeFile).not.toHaveBeenCalled();
+    await flushProjectFileSaves(environmentId, "/workspace");
+    expect(writeFile).toHaveBeenCalledExactlyOnceWith({
+      environmentId,
+      input: { cwd: "/workspace", relativePath: "file.txt", contents: "target project draft" },
+    });
+  });
+
+  it("contains automatic save exceptions while a later handoff can retry the retained draft", async () => {
+    writeFile.mockRejectedValueOnce(new Error("host write rejected"));
+    mount();
+    changeHandler()("retained draft");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(confirmFile).not.toHaveBeenCalled();
+    expect(onPendingChange).toHaveBeenLastCalledWith("file.txt", true);
+    await flushProjectFileSaves(environmentId, "/workspace");
+    expect(confirmFile).toHaveBeenCalledWith(
+      environmentId,
+      "/workspace",
+      "file.txt",
+      "retained draft",
+    );
+    expect(writeFile).toHaveBeenCalledTimes(2);
+  });
+
   it("clears an unchanged optimistic draft without writing or refreshing analysis", async () => {
     readFile.mockReturnValue(AsyncResult.success({ contents: "disk contents", truncated: false }));
     getUnsavedFile.mockReturnValue({ contents: "disk contents" });

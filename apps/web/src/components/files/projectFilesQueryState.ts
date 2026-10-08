@@ -34,12 +34,45 @@ export function optimisticFileAtom(
 }
 
 // Dirty contents must survive a closed preview, including failed or unauthorized saves.
-const unsavedFileMounts = new Map<ReturnType<typeof optimisticFileAtom>, () => void>();
+const unsavedFileMounts = new Map<
+  ReturnType<typeof optimisticFileAtom>,
+  { environmentId: EnvironmentId; cwd: string; relativePath: string; unmount: () => void }
+>();
+
+export interface UnsavedProjectFileSnapshot {
+  readonly relativePath: string;
+  readonly contents: string;
+}
+
+/** Includes drafts from closed previews, so a window handoff cannot lose them. */
+export function snapshotUnsavedProjectFiles(
+  environmentId: EnvironmentId,
+  cwd: string,
+): ReadonlyArray<UnsavedProjectFileSnapshot> {
+  const snapshot: UnsavedProjectFileSnapshot[] = [];
+  for (const [atom, retained] of unsavedFileMounts) {
+    if (retained.environmentId !== environmentId || retained.cwd !== cwd) continue;
+    const optimistic = appAtomRegistry.get(atom);
+    if (!optimistic || optimistic.confirmedAgainst !== undefined) continue;
+    snapshot.push({ relativePath: retained.relativePath, contents: optimistic.data.contents });
+  }
+  return snapshot;
+}
+
+export function restoreUnsavedProjectFiles(
+  environmentId: EnvironmentId,
+  cwd: string,
+  snapshot: ReadonlyArray<UnsavedProjectFileSnapshot>,
+): void {
+  for (const { relativePath, contents } of snapshot) {
+    setProjectFileQueryData(environmentId, cwd, relativePath, contents);
+  }
+}
 
 function releaseUnsavedFile(atom: ReturnType<typeof optimisticFileAtom>): void {
-  const unmount = unsavedFileMounts.get(atom);
+  const retained = unsavedFileMounts.get(atom);
   unsavedFileMounts.delete(atom);
-  unmount?.();
+  retained?.unmount();
 }
 
 interface ProjectQueryState<A> {
@@ -86,7 +119,12 @@ export function setProjectFileQueryData(
 ): void {
   const atom = optimisticFileAtom(environmentId, cwd, relativePath);
   if (!unsavedFileMounts.has(atom)) {
-    unsavedFileMounts.set(atom, appAtomRegistry.mount(atom));
+    unsavedFileMounts.set(atom, {
+      environmentId,
+      cwd,
+      relativePath,
+      unmount: appAtomRegistry.mount(atom),
+    });
   }
   appAtomRegistry.set(atom, {
     confirmedAgainst: undefined,

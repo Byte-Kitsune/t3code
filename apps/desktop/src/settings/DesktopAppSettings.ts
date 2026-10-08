@@ -30,6 +30,7 @@ export interface DesktopSettings {
   readonly linuxPasswordStore: LinuxPasswordStorePreference;
   readonly mainWindowBounds: DesktopWindowBounds | null;
   readonly mainWindowMaximized: boolean;
+  readonly fileViewerWindowBounds: DesktopWindowBounds | null;
   readonly serverExposureMode: DesktopServerExposureMode;
   readonly tailscaleServeEnabled: boolean;
   readonly tailscaleServePort: number;
@@ -79,6 +80,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   linuxPasswordStore: DEFAULT_LINUX_PASSWORD_STORE,
   mainWindowBounds: null,
   mainWindowMaximized: false,
+  fileViewerWindowBounds: null,
   serverExposureMode: "local-only",
   tailscaleServeEnabled: false,
   tailscaleServePort: DEFAULT_TAILSCALE_SERVE_PORT,
@@ -101,6 +103,7 @@ const DesktopSettingsDocument = Schema.Struct({
   linuxPasswordStore: Schema.optionalKey(Schema.Unknown),
   mainWindowBounds: Schema.optionalKey(Schema.NullOr(DesktopWindowBoundsDocument)),
   mainWindowMaximized: Schema.optionalKey(Schema.Boolean),
+  fileViewerWindowBounds: Schema.optionalKey(Schema.NullOr(DesktopWindowBoundsDocument)),
   serverExposureMode: Schema.optionalKey(DesktopServerExposureModeSchema),
   tailscaleServeEnabled: Schema.optionalKey(Schema.Boolean),
   tailscaleServePort: Schema.optionalKey(Schema.Number),
@@ -159,6 +162,9 @@ export class DesktopAppSettings extends Context.Service<
     readonly get: Effect.Effect<DesktopSettings>;
     readonly setLocalEnvironmentEnabled: (
       enabled: boolean,
+    ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
+    readonly setFileViewerWindowBounds: (
+      bounds: DesktopWindowBounds,
     ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
     readonly setMainWindowBounds: (
       bounds: DesktopWindowBounds,
@@ -235,6 +241,7 @@ function normalizeDesktopSettingsDocument(
     localEnvironmentEnabled: parsed.localEnvironmentEnabled !== false,
     linuxPasswordStore: normalizeLinuxPasswordStorePreference(parsed.linuxPasswordStore),
     mainWindowBounds,
+    fileViewerWindowBounds: normalizeMainWindowBounds(parsed.fileViewerWindowBounds),
     mainWindowMaximized: mainWindowBounds !== null && parsed.mainWindowMaximized === true,
     serverExposureMode:
       parsed.serverExposureMode === "network-accessible" ? "network-accessible" : "local-only",
@@ -265,6 +272,9 @@ function toDesktopSettingsDocument(
   }
   if (settings.mainWindowBounds !== null) {
     document.mainWindowBounds = settings.mainWindowBounds;
+  }
+  if (settings.fileViewerWindowBounds !== null) {
+    document.fileViewerWindowBounds = settings.fileViewerWindowBounds;
   }
   if (settings.mainWindowMaximized) {
     document.mainWindowMaximized = true;
@@ -307,6 +317,16 @@ function setServerExposureMode(
         ...settings,
         serverExposureMode: requestedMode,
       };
+}
+
+function setFileViewerWindowBounds(
+  settings: DesktopSettings,
+  bounds: DesktopWindowBounds,
+): DesktopSettings {
+  return settings.fileViewerWindowBounds !== null &&
+    desktopWindowBoundsEquivalence(settings.fileViewerWindowBounds, bounds)
+    ? settings
+    : { ...settings, fileViewerWindowBounds: bounds };
 }
 
 function setMainWindowBounds(
@@ -538,6 +558,8 @@ export const make = Effect.gen(function* () {
       );
       return yield* SynchronizedRef.setAndGet(settingsRef, settings);
     }).pipe(Effect.withSpan("desktop.settings.load")),
+    setFileViewerWindowBounds: (bounds) =>
+      persist((settings) => setFileViewerWindowBounds(settings, bounds)),
     setMainWindowBounds: (bounds, isMaximized) =>
       persist((settings) => setMainWindowBounds(settings, bounds, isMaximized)).pipe(
         Effect.withSpan("desktop.settings.setMainWindowBounds", {
@@ -611,6 +633,8 @@ export const layerTest = (initialSettings: DesktopSettings = DEFAULT_DESKTOP_SET
       return DesktopAppSettings.of({
         get: SynchronizedRef.get(settingsRef),
         load: SynchronizedRef.get(settingsRef),
+        setFileViewerWindowBounds: (bounds) =>
+          update((settings) => setFileViewerWindowBounds(settings, bounds)),
         setMainWindowBounds: (bounds, isMaximized) =>
           update((settings) => setMainWindowBounds(settings, bounds, isMaximized)),
         setServerExposureMode: (mode) =>

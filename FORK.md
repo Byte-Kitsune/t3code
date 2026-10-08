@@ -31,6 +31,14 @@ features, rather than a release log or a list of future tasks.
   Recently used areas appear first. Selection and recency are stored locally per
   environment and project; they are not shared repository configuration.
 
+- Desktop File Viewer can detach into one native window with its own editor
+  renderer and the same backend. Preserve the named hash-route allowlist,
+  normal isolated preload and independent window geometry. Tabs and unsaved
+  drafts transfer only after outgoing file writes settle; suspended save
+  coordinators must never retry after ownership moves. Closing the detached
+  window returns its files to the chat. Other threads in the same workspace
+  use the detached editor rather than opening a competing writer.
+
 Key boundaries: [area contracts](packages/contracts/src/monolith.ts),
 [area service](apps/server/src/project/MonolithService.ts),
 [shared path matching](packages/shared/src/monolithAreas.ts),

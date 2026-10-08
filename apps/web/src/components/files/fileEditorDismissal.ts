@@ -1,5 +1,6 @@
 interface FileEditorDismissalOptions {
   root: HTMLElement;
+  ownerDocument?: Document;
   editor: {
     setSelections: (selections: []) => void;
   };
@@ -17,7 +18,7 @@ function dismissFileEditorInteraction({
 
   const file = root.querySelector<HTMLElement>("diffs-container");
   const activeElement = file?.shadowRoot?.activeElement;
-  if (activeElement instanceof HTMLElement) {
+  if (activeElement && "blur" in activeElement && typeof activeElement.blur === "function") {
     activeElement.blur();
   }
 }
@@ -29,6 +30,7 @@ function isFileEditorFocused(root: HTMLElement): boolean {
 
 export function installFileEditorDismissal({
   root,
+  ownerDocument = root.ownerDocument,
   editor,
   isBlocked,
   onDismiss,
@@ -44,10 +46,10 @@ export function installFileEditorDismissal({
     dismissFileEditorInteraction({ root, editor, onDismiss });
   };
 
-  document.addEventListener("pointerdown", handlePointerDown, true);
-  document.addEventListener("keydown", handleKeyDown, true);
+  ownerDocument.addEventListener("pointerdown", handlePointerDown, { capture: true });
+  ownerDocument.addEventListener("keydown", handleKeyDown, { capture: true });
   return () => {
-    document.removeEventListener("pointerdown", handlePointerDown, true);
-    document.removeEventListener("keydown", handleKeyDown, true);
+    ownerDocument.removeEventListener("pointerdown", handlePointerDown, { capture: true });
+    ownerDocument.removeEventListener("keydown", handleKeyDown, { capture: true });
   };
 }

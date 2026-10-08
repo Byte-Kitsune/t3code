@@ -179,6 +179,7 @@ import {
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import { isElectron } from "../env";
+import { useDetachedFileViewer } from "./files/useDetachedFileViewer";
 import { readLocalApi } from "../localApi";
 import { useDiffPanelStore } from "../diffPanelStore";
 import { useActiveThreadRef } from "../hooks/useActiveThreadRef";
@@ -2308,6 +2309,7 @@ export default function ChatView(props: ChatViewProps) {
       useDiffPanelStore.getState().selectGitScope(activeThreadRef, "branch");
     }
   }, [activeThreadRef, diffOpen]);
+
   const rightPanelState = useRightPanelStore((state) =>
     selectThreadRightPanelState(state.byThreadKey, activeThreadRef),
   );
@@ -4220,6 +4222,11 @@ export default function ChatView(props: ChatViewProps) {
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
+  const detachedFileViewer = useDetachedFileViewer(
+    activeThreadRef,
+    activeWorkspaceRoot,
+    workspaceMutationId,
+  );
   useLayoutEffect(() => {
     if (
       threadDetailLoading ||
@@ -5582,9 +5589,14 @@ export default function ChatView(props: ChatViewProps) {
   const openFileSurface = useCallback(
     (relativePath: string, line?: number) => {
       if (!activeThreadRef || !activeProject) return;
+      if (detachedFileViewer.detached) {
+        detachedFileViewer.openFile(relativePath, line);
+        detachedFileViewer.focus();
+        return;
+      }
       useRightPanelStore.getState().openFile(activeThreadRef, relativePath, line);
     },
-    [activeProject, activeThreadRef],
+    [activeProject, activeThreadRef, detachedFileViewer],
   );
   // The thread's own change request, placed against the project it belongs to. Without a
   // project there is nothing to resolve it against, so the caller falls back to the browser.
@@ -6029,6 +6041,11 @@ export default function ChatView(props: ChatViewProps) {
   const activateRightPanelSurface = useCallback(
     (surface: RightPanelSurface) => {
       if (!activeThreadRef) return;
+      if (surface.kind === "file" && !surface.attachment && detachedFileViewer.detached) {
+        detachedFileViewer.openFile(surface.relativePath, surface.revealLine ?? undefined);
+        detachedFileViewer.focus();
+        return;
+      }
       useRightPanelStore.getState().activateSurface(activeThreadRef, surface.id);
       if (surface.kind === "preview" && surface.resourceId) {
         setActivePreviewTab(activeThreadRef, surface.resourceId);
@@ -6040,7 +6057,7 @@ export default function ChatView(props: ChatViewProps) {
         onDiffPanelOpen?.();
       }
     },
-    [activeThreadRef, diffOpen, onDiffPanelOpen],
+    [activeThreadRef, detachedFileViewer, diffOpen, onDiffPanelOpen],
   );
   const toggleRightPanel = useCallback(() => {
     if (!activeThreadRef) return;
@@ -11002,47 +11019,100 @@ export default function ChatView(props: ChatViewProps) {
         renderedRightPanelSurface?.kind === "file") &&
       ((activeProject && activeWorkspaceRoot) ||
         (renderedRightPanelSurface.kind === "file" && renderedRightPanelSurface.attachment)) ? (
-      <Suspense fallback={null}>
-        <FilePreviewPanel
-          key={`${activeThread.environmentId}:${
-            renderedRightPanelSurface.kind === "file" && renderedRightPanelSurface.attachment
-              ? `attachment:${renderedRightPanelSurface.attachment.id}`
-              : activeWorkspaceRoot
-          }`}
-          environmentId={activeThread.environmentId}
-          cwd={activeWorkspaceRoot ?? ""}
-          projectName={activeProject?.title ?? ""}
-          threadRef={activeThreadRef}
-          composerDraftTarget={composerDraftTarget}
-          keybindings={keybindings}
-          availableEditors={availableEditors}
-          relativePath={
-            renderedRightPanelSurface.kind === "file"
-              ? renderedRightPanelSurface.relativePath
-              : null
-          }
-          {...(renderedRightPanelSurface.kind === "file" && renderedRightPanelSurface.attachment
-            ? { attachment: renderedRightPanelSurface.attachment }
-            : {})}
-          revealLine={
-            renderedRightPanelSurface.kind === "file"
-              ? (renderedRightPanelSurface.revealLine ?? null)
-              : null
-          }
-          revealRequestId={
-            renderedRightPanelSurface.kind === "file"
-              ? renderedRightPanelSurface.revealRequestId
-              : 0
-          }
-          onOpenFile={openFileSurface}
-          onPendingChange={handleFilePendingChange}
-          selectedFilePending={
-            renderedRightPanelSurface.kind === "file" &&
-            pendingFileSurfaceIds.has(renderedRightPanelSurface.id)
-          }
-          workspaceMutationId={workspaceMutationId}
-        />
-      </Suspense>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {isElectron &&
+        activeProject &&
+        activeWorkspaceRoot &&
+        !(renderedRightPanelSurface.kind === "file" && renderedRightPanelSurface.attachment) ? (
+          <div className="flex shrink-0 items-center justify-end gap-2 border-b px-3 py-1">
+            {detachedFileViewer.detached ? (
+              <>
+                <Button variant="ghost" size="sm" onClick={detachedFileViewer.focus}>
+                  Show window
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={detachedFileViewer.busy}
+                  onClick={detachedFileViewer.dock}
+                >
+                  Dock File Viewer
+                </Button>
+              </>
+            ) : (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={detachedFileViewer.busy}
+                onClick={() => {
+                  void detachedFileViewer.detach({
+                    environmentId: activeThread.environmentId,
+                    cwd: activeWorkspaceRoot,
+                    projectName: activeProject.title,
+                    threadRef: activeThreadRef,
+                    composerDraftTarget,
+                    keybindings,
+                    availableEditors,
+                    workspaceMutationId,
+                  });
+                }}
+              >
+                {detachedFileViewer.busy ? "Moving File Viewer…" : "Detach File Viewer"}
+              </Button>
+            )}
+          </div>
+        ) : null}
+        {detachedFileViewer.detached ? (
+          <div className="flex flex-1 items-center justify-center p-6 text-sm text-muted-foreground">
+            File Viewer is open in a separate window.
+          </div>
+        ) : (
+          <div className="flex min-h-0 flex-1 flex-col" inert={detachedFileViewer.busy}>
+            <Suspense fallback={null}>
+              <FilePreviewPanel
+                key={`${activeThread.environmentId}:${
+                  renderedRightPanelSurface.kind === "file" && renderedRightPanelSurface.attachment
+                    ? `attachment:${renderedRightPanelSurface.attachment.id}`
+                    : activeWorkspaceRoot
+                }`}
+                environmentId={activeThread.environmentId}
+                cwd={activeWorkspaceRoot ?? ""}
+                projectName={activeProject?.title ?? ""}
+                threadRef={activeThreadRef}
+                composerDraftTarget={composerDraftTarget}
+                keybindings={keybindings}
+                availableEditors={availableEditors}
+                relativePath={
+                  renderedRightPanelSurface.kind === "file"
+                    ? renderedRightPanelSurface.relativePath
+                    : null
+                }
+                {...(renderedRightPanelSurface.kind === "file" &&
+                renderedRightPanelSurface.attachment
+                  ? { attachment: renderedRightPanelSurface.attachment }
+                  : {})}
+                revealLine={
+                  renderedRightPanelSurface.kind === "file"
+                    ? (renderedRightPanelSurface.revealLine ?? null)
+                    : null
+                }
+                revealRequestId={
+                  renderedRightPanelSurface.kind === "file"
+                    ? renderedRightPanelSurface.revealRequestId
+                    : 0
+                }
+                onOpenFile={openFileSurface}
+                onPendingChange={handleFilePendingChange}
+                selectedFilePending={
+                  renderedRightPanelSurface.kind === "file" &&
+                  pendingFileSurfaceIds.has(renderedRightPanelSurface.id)
+                }
+                workspaceMutationId={workspaceMutationId}
+              />
+            </Suspense>
+          </div>
+        )}
+      </div>
     ) : null
   ) : null;
   const threadDetailsPanelProps: ThreadDetailsPanelProps = {

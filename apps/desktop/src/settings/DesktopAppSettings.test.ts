@@ -24,6 +24,9 @@ const DesktopSettingsPatch = Schema.Struct({
       }),
     ),
   ),
+  fileViewerWindowBounds: Schema.optionalKey(
+    Schema.NullOr(DesktopAppSettings.DesktopWindowBoundsSchema),
+  ),
   mainWindowMaximized: Schema.optionalKey(Schema.Boolean),
   serverExposureMode: Schema.optionalKey(Schema.Literals(["local-only", "network-accessible"])),
   tailscaleServeEnabled: Schema.optionalKey(Schema.Boolean),
@@ -127,6 +130,7 @@ describe("DesktopSettings", () => {
         localEnvironmentEnabled: true,
         mainWindowBounds: null,
         mainWindowMaximized: false,
+        fileViewerWindowBounds: null,
         serverExposureMode: "local-only",
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
@@ -157,6 +161,7 @@ describe("DesktopSettings", () => {
           localEnvironmentEnabled: true,
           mainWindowBounds: null,
           mainWindowMaximized: false,
+          fileViewerWindowBounds: null,
           serverExposureMode: "network-accessible",
           tailscaleServeEnabled: true,
           tailscaleServePort: 8443,
@@ -265,6 +270,7 @@ describe("DesktopSettings", () => {
           localEnvironmentEnabled: true,
           mainWindowBounds: { x: 120, y: 80, width: 1280, height: 900 },
           mainWindowMaximized: false,
+          fileViewerWindowBounds: null,
           serverExposureMode: "network-accessible",
           tailscaleServeEnabled: true,
           tailscaleServePort: 8443,
@@ -322,6 +328,7 @@ describe("DesktopSettings", () => {
             localEnvironmentEnabled: true,
             mainWindowBounds: null,
             mainWindowMaximized: false,
+            fileViewerWindowBounds: null,
             serverExposureMode: "network-accessible",
             tailscaleServeEnabled: true,
             tailscaleServePort: 8443,
@@ -333,6 +340,24 @@ describe("DesktopSettings", () => {
           } satisfies DesktopAppSettings.DesktopSettings);
         }),
       ),
+  );
+
+  it.effect("persists file viewer geometry independently and reloads it", () =>
+    withSettings(
+      Effect.gen(function* () {
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+        const main = { x: 0, y: 0, width: 1100, height: 780 };
+        const detached = { x: -1000, y: 50, width: 900, height: 700 };
+        yield* settings.setMainWindowBounds(main, true);
+        const first = yield* settings.setFileViewerWindowBounds(detached);
+        assert.isTrue(first.changed);
+        assert.isFalse((yield* settings.setFileViewerWindowBounds(detached)).changed);
+        const restored = yield* settings.load;
+        assert.deepEqual(restored.fileViewerWindowBounds, detached);
+        assert.deepEqual(restored.mainWindowBounds, main);
+        assert.isTrue(restored.mainWindowMaximized);
+      }),
+    ),
   );
 
   it.effect("persists sparse desktop settings documents", () =>
@@ -399,6 +424,7 @@ describe("DesktopSettings", () => {
           localEnvironmentEnabled: true,
           mainWindowBounds: null,
           mainWindowMaximized: false,
+          fileViewerWindowBounds: null,
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
@@ -428,6 +454,7 @@ describe("DesktopSettings", () => {
           localEnvironmentEnabled: true,
           mainWindowBounds: null,
           mainWindowMaximized: false,
+          fileViewerWindowBounds: null,
           serverExposureMode: "local-only",
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
@@ -456,6 +483,7 @@ describe("DesktopSettings", () => {
           localEnvironmentEnabled: true,
           mainWindowBounds: null,
           mainWindowMaximized: false,
+          fileViewerWindowBounds: null,
           serverExposureMode: "local-only",
           tailscaleServeEnabled: true,
           tailscaleServePort: 443,

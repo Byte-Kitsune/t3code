@@ -19,13 +19,15 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
   private confirmedRevision = 0;
   private lastChangeAt = 0;
   private saving = false;
+  private runningSave: Promise<void> | null = null;
   private disposed = false;
+  private suspended = false;
   private persistedContents: string | undefined;
 
   constructor(private readonly options: FileSaveCoordinatorOptions<A, E>) {}
 
   change(contents: string): void {
-    if (this.disposed) return;
+    if (this.disposed || this.suspended) return;
     if (this.latestRevision === 0) {
       this.persistedContents = this.options.readPersistedContents?.();
     }
@@ -47,17 +49,48 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
     this.schedule(this.options.debounceMs);
   }
 
+  suspend(): void {
+    this.suspended = true;
+    this.clearTimer();
+  }
+
+  resume(): void {
+    if (this.disposed) return;
+    this.suspended = false;
+    if (this.latestRevision > this.confirmedRevision) this.schedule(this.options.debounceMs);
+  }
+
+  async waitForIdle(): Promise<void> {
+    let failure: { error: unknown } | undefined;
+    while (this.runningSave) {
+      try {
+        await this.runningSave;
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+    if (failure) throw failure.error;
+  }
+
+  async flush(): Promise<void> {
+    this.clearTimer();
+    await this.waitForIdle();
+    this.clearTimer();
+    if (this.latestRevision > this.confirmedRevision) await this.persistLatest();
+    this.clearTimer();
+  }
+
   dispose(): void {
     this.disposed = true;
     this.clearTimer();
-    if (this.latestRevision > 0) void this.persistLatest();
+    if (this.latestRevision > 0) void this.persistLatest().catch(() => {});
   }
 
   private schedule(delay: number): void {
     this.clearTimer();
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.persistLatest();
+      void this.persistLatest().catch(() => {});
     }, delay);
   }
 
@@ -67,7 +100,21 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
     this.timer = null;
   }
 
-  private async persistLatest(): Promise<void> {
+  private persistLatest(): Promise<void> {
+    if (this.suspended) return Promise.resolve();
+    if (this.runningSave) return this.runningSave;
+    const revision = this.latestRevision;
+    const operation = this.performPersistLatest().finally(() => {
+      this.runningSave = null;
+      // A retired editor must finish newer edits queued during its last write.
+      if (this.disposed && this.latestRevision > revision)
+        void this.persistLatest().catch(() => {});
+    });
+    this.runningSave = operation;
+    return operation;
+  }
+
+  private async performPersistLatest(): Promise<void> {
     if (this.saving || this.latestRevision === this.confirmedRevision) return;
     if (this.latestContents === this.persistedContents) {
       this.confirmUnchanged();
@@ -80,7 +127,12 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
     this.saving = true;
     const contents = this.latestContents;
     const revision = this.latestRevision;
-    const result = await this.options.persist(contents);
+    let result: AtomCommandResult<A, E>;
+    try {
+      result = await this.options.persist(contents);
+    } finally {
+      this.saving = false;
+    }
     const succeeded = result._tag === "Success";
     let confirmed = false;
     if (succeeded) {
@@ -99,9 +151,7 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
       0,
       this.options.debounceMs - (Date.now() - this.lastChangeAt),
     );
-    if (this.disposed) {
-      void this.persistLatest();
-    } else {
+    if (!this.disposed) {
       this.schedule(remainingDebounce);
     }
   }

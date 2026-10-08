@@ -18,6 +18,31 @@ import {
 
 const FILE_SAVE_DEBOUNCE_MS = 500;
 
+const activeFileSaves = new Map<
+  FileSaveCoordinator,
+  { environmentId: EnvironmentId; cwd: string }
+>();
+
+/** Freeze the editor before calling so the receiving window owns all subsequent writes. */
+export async function flushProjectFileSaves(
+  environmentId: EnvironmentId,
+  cwd: string,
+): Promise<void> {
+  const coordinators = [...activeFileSaves].flatMap(([coordinator, context]) =>
+    context.environmentId === environmentId && context.cwd === cwd ? [coordinator] : [],
+  );
+  const results = await Promise.allSettled(coordinators.map((coordinator) => coordinator.flush()));
+  for (const coordinator of coordinators) coordinator.suspend();
+  const failed = results.find((result) => result.status === "rejected");
+  if (failed?.status === "rejected") throw failed.reason;
+}
+
+export function resumeProjectFileSaves(environmentId: EnvironmentId, cwd: string): void {
+  for (const [coordinator, context] of activeFileSaves) {
+    if (context.environmentId === environmentId && context.cwd === cwd) coordinator.resume();
+  }
+}
+
 interface FileSaveOptions {
   environmentId: EnvironmentId;
   cwd: string;
@@ -64,9 +89,15 @@ export function useFileSaveCoordinator({
           },
         });
         coordinatorRef.current = coordinator;
+        activeFileSaves.set(coordinator, { environmentId, cwd });
         return () => {
           coordinatorRef.current = null;
           coordinator.dispose();
+          // Disposed previews may still own an in-flight write during a window handoff.
+          void coordinator
+            .waitForIdle()
+            .catch(() => {})
+            .finally(() => activeFileSaves.delete(coordinator));
         };
       },
     };

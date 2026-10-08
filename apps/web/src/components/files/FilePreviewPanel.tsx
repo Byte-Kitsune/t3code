@@ -138,6 +138,11 @@ import {
   useProjectFileQuery,
 } from "./projectFilesQueryState";
 
+export interface FileReviewCommentActions {
+  add: ReturnType<typeof useComposerDraftStore.getState>["addReviewComment"];
+  remove: ReturnType<typeof useComposerDraftStore.getState>["removeReviewComment"];
+}
+
 interface FilePreviewPanelProps {
   environmentId: EnvironmentId;
   cwd: string;
@@ -154,6 +159,7 @@ interface FilePreviewPanelProps {
   onPendingChange: (relativePath: string, pending: boolean) => void;
   selectedFilePending: boolean;
   workspaceMutationId: string | null;
+  reviewCommentActions?: FileReviewCommentActions;
 }
 
 const FILE_EXPLORER_STORAGE_KEY = "t3code.fileExplorerOpen";
@@ -657,6 +663,7 @@ function useEditableAfterHighlight(file: FileContents) {
 }
 
 interface EditableFileSurfaceProps {
+  reviewCommentActions?: FileReviewCommentActions;
   environmentId: EnvironmentId;
   cwd: string;
   relativePath: string;
@@ -695,9 +702,12 @@ function EditableFileSurface({
   onPostRender,
   onPendingChange,
   onTokenClick,
+  reviewCommentActions,
 }: EditableFileSurfaceProps) {
-  const addReviewComment = useComposerDraftStore((store) => store.addReviewComment);
-  const removeReviewComment = useComposerDraftStore((store) => store.removeReviewComment);
+  const storeAddReviewComment = useComposerDraftStore((store) => store.addReviewComment);
+  const storeRemoveReviewComment = useComposerDraftStore((store) => store.removeReviewComment);
+  const addReviewComment = reviewCommentActions?.add ?? storeAddReviewComment;
+  const removeReviewComment = reviewCommentActions?.remove ?? storeRemoveReviewComment;
   const [lineAnnotations, setLineAnnotations] = useState<FileCommentLineAnnotation[]>([]);
   const renderedAnnotations = useMemo(
     () => mergeFileAnalyzerAnnotations(lineAnnotations, diagnostics, queries, devComments),
@@ -1070,6 +1080,7 @@ export default function FilePreviewPanel({
   onPendingChange,
   selectedFilePending,
   workspaceMutationId,
+  reviewCommentActions,
 }: FilePreviewPanelProps) {
   const relativePath =
     attachment === undefined ? resolveFilePreviewPath(requestedPath, cwd) : requestedPath;
@@ -1601,6 +1612,7 @@ export default function FilePreviewPanel({
                   cwd={cwd}
                   relativePath={relativePath}
                   composerDraftTarget={composerDraftTarget}
+                  {...(reviewCommentActions ? { reviewCommentActions } : {})}
                   contents={file.data.contents}
                   diagnostics={fileCheck.diagnostics}
                   queries={queryAnnotations}

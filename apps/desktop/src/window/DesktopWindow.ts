@@ -32,6 +32,38 @@ import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
 import { makeQuitShortcutHandler } from "./QuitHold.ts";
 
+export const FILE_VIEWER_WINDOW_NAME = "t3-file-viewer";
+
+export function isFileViewerWindowRequest(
+  url: string,
+  frameName: string,
+  applicationUrl: string,
+): boolean {
+  if (frameName !== FILE_VIEWER_WINDOW_NAME) return false;
+  try {
+    const target = new URL(url);
+    const app = new URL(applicationUrl);
+    const route = new URL(target.hash.slice(1), "https://route.invalid");
+    return (
+      target.protocol === app.protocol &&
+      target.host === app.host &&
+      target.username === "" &&
+      target.password === "" &&
+      target.pathname === app.pathname &&
+      target.search === app.search &&
+      target.hash.startsWith("#/detached-files") &&
+      route.origin === "https://route.invalid" &&
+      route.username === "" &&
+      route.password === "" &&
+      route.pathname === "/detached-files" &&
+      route.hash === "" &&
+      [...route.searchParams.keys()].every((key) => key === "environmentId" || key === "threadId")
+    );
+  } catch {
+    return false;
+  }
+}
+
 const TITLEBAR_HEIGHT = 40;
 // Matches --workspace-topbar-height in apps/web/src/index.css. Native macOS
 // buttons are 14 points tall and do not scale with the renderer's zoom.
@@ -199,6 +231,24 @@ export function resolveInitialMainWindowBounds(
   return DesktopAppSettings.DEFAULT_MAIN_WINDOW_SIZE;
 }
 
+export function resolveInitialFileViewerWindowBounds(
+  persisted: DesktopAppSettings.DesktopWindowBounds | null,
+  displays: readonly DisplayBounds[],
+): DesktopAppSettings.DesktopWindowBounds | typeof DesktopAppSettings.DEFAULT_MAIN_WINDOW_SIZE {
+  if (persisted && displays.some((display) => windowFitsWithinDisplay(persisted, display)))
+    return persisted;
+  const display = displays[0];
+  if (!display) return DesktopAppSettings.DEFAULT_MAIN_WINDOW_SIZE;
+  const width = Math.max(840, Math.min(persisted?.width ?? 1100, display.width));
+  const height = Math.max(620, Math.min(persisted?.height ?? 780, display.height));
+  return {
+    x: display.x + Math.max(0, Math.floor((display.width - width) / 2)),
+    y: display.y + Math.max(0, Math.floor((display.height - height) / 2)),
+    width,
+    height,
+  };
+}
+
 // A self-contained "Connecting to WSL" splash, shown immediately in wsl-only
 // mode while the WSL backend (which serves the renderer) cold-boots. Inlined as
 // a data URL so it needs no bundled asset and no backend — pure CSS, no JS.
@@ -314,6 +364,7 @@ function bindFirstRevealTrigger(
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
+  const nativeFrameWindows = new WeakSet<Electron.BrowserWindow>();
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const assets = yield* DesktopAssets.DesktopAssets;
   const electronMenu = yield* ElectronMenu.ElectronMenu;
@@ -512,7 +563,77 @@ export const make = Effect.gen(function* () {
         fiber === undefined ? Effect.void : Fiber.join(fiber).pipe(Effect.asVoid),
       ),
     );
-    flushMainWindowBounds = flushBoundsPersist;
+    let detachedWindow: Electron.BrowserWindow | undefined;
+    let detachedBounds = persistedSettings.fileViewerWindowBounds;
+    let detachedPersistFiber: Fiber.Fiber<void, never> | undefined;
+    let detachedWriteFiber: Fiber.Fiber<void, never> | undefined;
+    const clearDetachedPersist = () => {
+      if (detachedPersistFiber !== undefined) {
+        runFork(Fiber.interrupt(detachedPersistFiber));
+        detachedPersistFiber = undefined;
+      }
+    };
+    const persistDetachedBounds = () => {
+      if (!detachedWindow || detachedWindow.isDestroyed()) return;
+      const bounds = DesktopAppSettings.normalizeMainWindowBounds(detachedWindow.getNormalBounds());
+      if (!bounds) return;
+      detachedBounds = bounds;
+      detachedWriteFiber = runFork(
+        desktopSettings.setFileViewerWindowBounds(bounds).pipe(
+          Effect.asVoid,
+          Effect.catch((error) =>
+            logWindowWarning("failed to persist file viewer bounds", { message: error.message }),
+          ),
+        ),
+      );
+    };
+    const flushDetachedBounds = Effect.sync(() => {
+      clearDetachedPersist();
+      persistDetachedBounds();
+      return detachedWriteFiber;
+    }).pipe(
+      Effect.flatMap((fiber) => (fiber ? Fiber.join(fiber).pipe(Effect.asVoid) : Effect.void)),
+    );
+    flushMainWindowBounds = Effect.all([flushBoundsPersist, flushDetachedBounds]).pipe(
+      Effect.asVoid,
+    );
+    const attachDetachedWindow = (popup: Electron.BrowserWindow, initialUrl: string) => {
+      if (detachedWindow && !detachedWindow.isDestroyed()) detachedWindow.destroy();
+      detachedWindow = popup;
+      nativeFrameWindows.add(popup);
+      popup.setTitle(`${environment.displayName} — File Viewer`);
+      popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      // The independent renderer may reload its own route, but must not turn
+      // into a general browser window with the application's preload privileges.
+      popup.webContents.on("will-navigate", (event, url) => {
+        if (url !== initialUrl) event.preventDefault();
+      });
+      popup.webContents.on("will-frame-navigate", (event) => {
+        if (!event.isMainFrame || event.url !== initialUrl) event.preventDefault();
+      });
+      popup.webContents.on("will-redirect", (event) => event.preventDefault());
+      popup.webContents.on("will-attach-webview", (event) => event.preventDefault());
+      const schedule = () => {
+        clearDetachedPersist();
+        detachedPersistFiber = runFork(
+          Effect.sleep(MAIN_WINDOW_BOUNDS_PERSIST_DEBOUNCE_MS).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                detachedPersistFiber = undefined;
+                persistDetachedBounds();
+              }),
+            ),
+          ),
+        );
+      };
+      popup.on("move", schedule);
+      popup.on("resize", schedule);
+      popup.on("close", () => runFork(flushDetachedBounds));
+      popup.on("closed", () => {
+        clearDetachedPersist();
+        if (detachedWindow === popup) detachedWindow = undefined;
+      });
+    };
 
     yield* previewManager.setMainWindow(window);
     window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
@@ -597,8 +718,14 @@ export const make = Effect.gen(function* () {
           }),
         );
       });
-      contents.on("did-create-window", (popup) => {
+      contents.on("did-create-window", (popup, details) => {
         installContextMenu(popup, popup.webContents);
+        if (
+          contents === window.webContents &&
+          isFileViewerWindowRequest(details.url, details.frameName, applicationUrl)
+        ) {
+          attachDetachedWindow(popup, details.url);
+        }
       });
     };
     installContextMenu(window, window.webContents);
@@ -607,7 +734,37 @@ export const make = Effect.gen(function* () {
       void runPromise(previewManager.prepareWebview(contents));
     });
 
-    window.webContents.setWindowOpenHandler(({ url }) => {
+    window.webContents.setWindowOpenHandler(({ url, frameName }) => {
+      if (isFileViewerWindowRequest(url, frameName, applicationUrl)) {
+        let displays: readonly Electron.Rectangle[] = [];
+        try {
+          displays = Electron.screen
+            .getAllDisplays()
+            .map((display) => display.workArea ?? display.bounds);
+        } catch {
+          /* Fall back to a visible default size. */
+        }
+        return {
+          action: "allow",
+          overrideBrowserWindowOptions: {
+            ...resolveInitialFileViewerWindowBounds(detachedBounds, displays),
+            minWidth: 840,
+            minHeight: 620,
+            frame: true,
+            titleBarStyle: "default",
+            title: `${environment.displayName} — File Viewer`,
+            autoHideMenuBar: true,
+            ...iconOption,
+            webPreferences: {
+              contextIsolation: true,
+              nodeIntegration: false,
+              sandbox: true,
+              webviewTag: false,
+              preload: environment.preloadPath,
+            },
+          },
+        };
+      }
       if (Option.isSome(ElectronShell.parseSafeExternalUrl(url))) {
         void runPromise(electronShell.openExternal(url));
       }
@@ -680,7 +837,7 @@ export const make = Effect.gen(function* () {
     window.on("maximize", scheduleBoundsPersist);
     window.on("unmaximize", scheduleBoundsPersist);
     window.on("close", () => {
-      runFork(flushBoundsPersist);
+      runFork(flushMainWindowBounds);
     });
 
     if (environment.platform === "darwin") {
@@ -839,6 +996,8 @@ export const make = Effect.gen(function* () {
     }
 
     window.on("closed", () => {
+      clearDetachedPersist();
+      if (detachedWindow && !detachedWindow.isDestroyed()) detachedWindow.destroy();
       clearDevelopmentLoadRetry();
       clearBoundsPersist();
       void runPromise(electronWindow.clearMain(Option.some(window)));
@@ -1030,7 +1189,12 @@ export const make = Effect.gen(function* () {
     syncAppearance: Effect.gen(function* () {
       const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
       yield* electronWindow.syncAllAppearance((window) =>
-        syncWindowAppearance(window, shouldUseDarkColors, environment.platform),
+        nativeFrameWindows.has(window)
+          ? Effect.sync(() => {
+              if (!window.isDestroyed())
+                window.setBackgroundColor(getInitialWindowBackgroundColor(shouldUseDarkColors));
+            })
+          : syncWindowAppearance(window, shouldUseDarkColors, environment.platform),
       );
     }).pipe(Effect.withSpan("desktop.window.syncAppearance")),
   });

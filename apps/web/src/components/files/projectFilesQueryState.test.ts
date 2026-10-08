@@ -29,6 +29,8 @@ import {
   getUnsavedProjectFileQueryData,
   resolveProjectFileQueryData,
   setProjectFileQueryData,
+  snapshotUnsavedProjectFiles,
+  restoreUnsavedProjectFiles,
 } from "./projectFilesQueryState";
 
 const environmentId = EnvironmentId.make("environment-project-files-query-test");
@@ -52,6 +54,55 @@ describe("project files queries", () => {
     drainRegistryTasks();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("transfers all retained drafts while isolating environments and project roots", () => {
+    const otherEnvironment = EnvironmentId.make("environment-draft-transfer-other");
+    const transferredEnvironment = EnvironmentId.make("environment-draft-transfer-destination");
+    const files = ["convex.json", "src/closed-preview.ts"];
+    try {
+      setProjectFileQueryData(environmentId, "/repo", files[0]!, "first draft");
+      setProjectFileQueryData(environmentId, "/repo", files[0]!, "latest draft");
+      setProjectFileQueryData(environmentId, "/repo", files[1]!, "closed preview draft ✓");
+      setProjectFileQueryData(otherEnvironment, "/repo", files[0]!, "other environment");
+      setProjectFileQueryData(environmentId, "/other", files[0]!, "other project");
+      const snapshot = snapshotUnsavedProjectFiles(environmentId, "/repo");
+      expect(snapshot).toEqual([
+        { relativePath: files[0], contents: "latest draft" },
+        { relativePath: files[1], contents: "closed preview draft ✓" },
+      ]);
+
+      restoreUnsavedProjectFiles(transferredEnvironment, "/destination", snapshot);
+      expect(snapshotUnsavedProjectFiles(transferredEnvironment, "/destination")).toEqual(snapshot);
+      expect(
+        getUnsavedProjectFileQueryData(transferredEnvironment, "/destination", files[1]!),
+      ).toMatchObject({
+        contents: "closed preview draft ✓",
+        byteLength: new TextEncoder().encode("closed preview draft ✓").byteLength,
+      });
+      expect(getUnsavedProjectFileQueryData(otherEnvironment, "/repo", files[0]!)?.contents).toBe(
+        "other environment",
+      );
+    } finally {
+      for (const path of files) {
+        clearProjectFileQueryData(environmentId, "/repo", path);
+        clearProjectFileQueryData(transferredEnvironment, "/destination", path);
+      }
+      clearProjectFileQueryData(otherEnvironment, "/repo", files[0]!);
+      clearProjectFileQueryData(environmentId, "/other", files[0]!);
+    }
+  });
+
+  it("does not transfer confirmed or explicitly cleared drafts", () => {
+    vi.stubGlobal("window", {});
+    setProjectFileQueryData(environmentId, "/repo", "convex.json", "saved contents");
+    expect(
+      confirmProjectFileQueryData(environmentId, "/repo", "convex.json", "saved contents"),
+    ).toBe(true);
+    expect(snapshotUnsavedProjectFiles(environmentId, "/repo")).toEqual([]);
+    setProjectFileQueryData(environmentId, "/repo", "convex.json", "discarded contents");
+    clearProjectFileQueryData(environmentId, "/repo", "convex.json");
+    expect(snapshotUnsavedProjectFiles(environmentId, "/repo")).toEqual([]);
   });
 
   it("resumes an unsaved draft after closing the preview and restoring write access", async () => {

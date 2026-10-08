@@ -18,6 +18,17 @@ separately because they cannot be opened as current files. Git uses locally know
 remote refs; the filter does not fetch from the network. A branch without a usable
 remote or base reference treats its committed files as unpublished.
 
+## Separate File Viewer window
+
+On desktop, open the File Viewer and choose **Detach File Viewer**. Move its
+window to another monitor while keeping the chat in the main window. Its size
+and position are remembered. **Dock in chat**, or closing the separate window,
+returns the open file tabs and unsaved changes to the chat.
+
+One File Viewer window can be detached at a time. It stays with the original
+workspace when you change chats or projects; review comments go to its original
+chat. File links from other chats in that workspace open in the detached viewer.
+
 ## File checks
 
 PHP areas use Mago. React areas can use Biome, ESLint and dependency-cruiser together. Install the

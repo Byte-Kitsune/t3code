@@ -98,6 +98,7 @@ function makeFakeBrowserWindow() {
 
   const window = {
     close: vi.fn(),
+    destroy: vi.fn(),
     focus: vi.fn(),
     getBounds: vi.fn(() => ({ x: 0, y: 0, width: 1100, height: 780 })),
     getNormalBounds: vi.fn(() => ({ x: 0, y: 0, width: 1100, height: 780 })),
@@ -232,6 +233,11 @@ function layerTest(input: {
   const layerDesktopAppSettings = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
     get: Effect.sync(() => desktopSettings),
     load: Effect.sync(() => desktopSettings),
+    setFileViewerWindowBounds: (bounds) =>
+      Effect.sync(() => {
+        desktopSettings = { ...desktopSettings, fileViewerWindowBounds: bounds };
+        return { settings: desktopSettings, changed: true };
+      }),
     setMainWindowBounds: (bounds, isMaximized) =>
       Effect.gen(function* () {
         if (input.beforeMainWindowBoundsUpdate) {
@@ -1362,6 +1368,147 @@ describe("DesktopWindow", () => {
       }),
     );
   });
+
+  it("accepts only detached hash routes on the existing app shell in packaged and development clients", () => {
+    const name = DesktopWindow.FILE_VIEWER_WINDOW_NAME;
+    for (const app of [
+      "t3code-dev://app/",
+      "t3code://app/index.html",
+      "file:///Applications/T3.app/Contents/Resources/index.html",
+      "http://localhost:5733/?theme=test",
+    ]) {
+      const viewer = new URL(app);
+      viewer.hash = "/detached-files?environmentId=local&threadId=test";
+      assert.isTrue(DesktopWindow.isFileViewerWindowRequest(viewer.href, name, app));
+      viewer.pathname = "/other.html";
+      assert.isFalse(DesktopWindow.isFileViewerWindowRequest(viewer.href, name, app));
+      viewer.pathname = new URL(app).pathname;
+      for (const hash of [
+        "/settings",
+        "/detached-files?cwd=secret",
+        "//evil.example/detached-files",
+        "/detached-files#other",
+        "/detached-files/other",
+      ]) {
+        viewer.hash = hash;
+        assert.isFalse(DesktopWindow.isFileViewerWindowRequest(viewer.href, name, app));
+      }
+    }
+  });
+
+  it("restores detached bounds across displays and recovers disconnected or smaller monitors", () => {
+    const saved = { x: -1200, y: 30, width: 1000, height: 700 };
+    assert.deepEqual(
+      DesktopWindow.resolveInitialFileViewerWindowBounds(saved, [
+        { x: -1920, y: 0, width: 1920, height: 1080 },
+      ]),
+      saved,
+    );
+    assert.deepEqual(
+      DesktopWindow.resolveInitialFileViewerWindowBounds(saved, [
+        { x: 0, y: 0, width: 1024, height: 768 },
+      ]),
+      { x: 12, y: 34, width: 1000, height: 700 },
+    );
+    assert.deepEqual(
+      DesktopWindow.resolveInitialFileViewerWindowBounds(
+        { x: 3000, y: 0, width: 1600, height: 900 },
+        [{ x: 0, y: 0, width: 1024, height: 768 }],
+      ),
+      { x: 0, y: 0, width: 1024, height: 768 },
+    );
+  });
+
+  it.effect(
+    "allows only the named application file viewer and isolates its navigation and bounds",
+    () =>
+      Effect.gen(function* () {
+        const main = makeFakeBrowserWindow();
+        const child = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const saved = { x: 100, y: 100, width: 1000, height: 700 };
+        const layer = layerTest({
+          window: main.window,
+          createCount,
+          mainWindow,
+          desktopSettings: {
+            ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+            fileViewerWindowBounds: saved,
+          },
+        });
+        yield* Effect.gen(function* () {
+          const service = yield* DesktopWindow.DesktopWindow;
+          yield* service.handleBackendReady(new URL("http://127.0.0.1:3773"));
+          const handler = vi.mocked(main.window.webContents.setWindowOpenHandler).mock
+            .calls[0]?.[0];
+          if (!handler) return yield* Effect.die("missing popup handler");
+          const viewerUrl = "t3code-dev://app/#/detached-files?environmentId=local&threadId=test";
+          const request = (url: string, frameName: string) =>
+            handler({
+              url,
+              frameName,
+              features: "",
+              disposition: "new-window",
+              referrer: { url: "", policy: "default" },
+            });
+          const allowed = request(viewerUrl, DesktopWindow.FILE_VIEWER_WINDOW_NAME);
+          assert.equal(allowed.action, "allow");
+          assert.deepEqual(allowed.overrideBrowserWindowOptions?.webPreferences, {
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+            webviewTag: false,
+            preload: "/repo/apps/desktop/dist-electron/preload.cjs",
+          });
+          assert.equal(allowed.overrideBrowserWindowOptions?.x, saved.x);
+          assert.equal(request(viewerUrl, "other").action, "deny");
+          assert.equal(
+            request("https://example.com/detached-files", DesktopWindow.FILE_VIEWER_WINDOW_NAME)
+              .action,
+            "deny",
+          );
+          assert.equal(
+            request("t3code-dev://app/settings", DesktopWindow.FILE_VIEWER_WINDOW_NAME).action,
+            "deny",
+          );
+          assert.equal(
+            request("javascript:alert(1)", DesktopWindow.FILE_VIEWER_WINDOW_NAME).action,
+            "deny",
+          );
+          assert.equal(
+            request("about:blank#other", DesktopWindow.FILE_VIEWER_WINDOW_NAME).action,
+            "deny",
+          );
+          const created = main.webContentsListeners.get("did-create-window");
+          if (!created) return yield* Effect.die("missing popup lifecycle handler");
+          created(child.window, {
+            url: viewerUrl,
+            frameName: DesktopWindow.FILE_VIEWER_WINDOW_NAME,
+          });
+          for (const name of [
+            "will-navigate",
+            "will-frame-navigate",
+            "will-redirect",
+            "will-attach-webview",
+          ]) {
+            const preventDefault = vi.fn();
+            child.webContentsListeners.get(name)?.({ preventDefault }, "https://example.com");
+            assert.equal(preventDefault.mock.calls.length, 1);
+          }
+          child.getNormalBounds.mockReturnValue({ x: 200, y: 120, width: 900, height: 650 });
+          yield* service.flushMainWindowBounds;
+          assert.equal(
+            request(viewerUrl, DesktopWindow.FILE_VIEWER_WINDOW_NAME).overrideBrowserWindowOptions
+              ?.x,
+            200,
+          );
+          child.windowListeners.get("close")?.();
+          main.windowListeners.get("closed")?.();
+          assert.equal(vi.mocked(child.window.destroy).mock.calls.length, 1);
+        }).pipe(Effect.provide(layer));
+      }),
+  );
 
   it.effect("opens safe off-origin renderer navigations in the system browser", () =>
     Effect.gen(function* () {

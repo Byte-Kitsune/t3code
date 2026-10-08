@@ -106,6 +106,7 @@ export const Route = createRootRoute({
       authGateState.status === "authenticated" &&
       getDesktopSnapShotBridge() &&
       shouldResumeSnapShotSetupOnStartup() &&
+      location.pathname !== "/detached-files" &&
       location.pathname !== "/settings/snap-shot"
     ) {
       throw redirect({ to: "/settings/snap-shot", replace: true });
@@ -207,6 +208,23 @@ function RootRouteView() {
       </AppSidebarLayout>
     </CommandPalette>
   );
+
+  // A detached editor connects to the same environment, without mounting a
+  // second chat shell, notification coordinator, or startup navigation.
+  if (pathname === "/detached-files") {
+    return (
+      <ToastProvider>
+        <AnchoredToastProvider>
+          <ContrastAppearanceSync />
+          <EnvironmentThemeSync />
+          <GlassAppearanceSync />
+          <FontAppearanceSync />
+          <ConfirmDialogHost />
+          <Outlet />
+        </AnchoredToastProvider>
+      </ToastProvider>
+    );
+  }
 
   // FirstRunGate holds back everything below it — including EventRouter,
   // whose welcome payload navigates into a thread — until the first-run

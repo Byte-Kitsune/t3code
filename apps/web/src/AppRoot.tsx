@@ -11,10 +11,11 @@ import type { AppRouter } from "./router";
  * share the same atom registry as routed UI.
  */
 export function AppRoot({ router }: { readonly router: AppRouter }) {
+  const detachedFiles = window.location.hash.startsWith("#/detached-files?");
   return (
     <AppAtomRegistryProvider>
       <RouterProvider router={router} />
-      <ElectronBrowserHost />
+      {detachedFiles ? null : <ElectronBrowserHost />}
       <QuitHoldOverlay />
     </AppAtomRegistryProvider>
   );

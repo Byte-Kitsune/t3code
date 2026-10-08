@@ -180,6 +180,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       ? Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
           get: Effect.sync(() => testSettings),
           load: Effect.sync(() => testSettings),
+          setFileViewerWindowBounds: () => Effect.die("unexpected file viewer bounds update"),
           setMainWindowBounds: () => Effect.die("unexpected main window bounds update"),
           setServerExposureMode: () => Effect.die("unexpected server exposure update"),
           setTailscaleServe: () => Effect.die("unexpected Tailscale Serve update"),
