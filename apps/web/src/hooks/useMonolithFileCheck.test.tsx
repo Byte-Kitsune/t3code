@@ -199,9 +199,35 @@ describe("automatic saved-file checks", () => {
     doubles.toolsRevision++;
     await update(base);
     expect(doubles.check).toHaveBeenCalledTimes(2);
-    expect(latest?.diagnostics).toEqual([]);
+    expect(latest?.diagnostics).toHaveLength(1);
+    expect(latest?.status).toBe("checking");
     await act(async () => pending[1]?.(success(base.contents)));
     expect(latest?.diagnostics).toHaveLength(1);
+  });
+
+  it("does not recheck identical contents across no-op saves or callback changes", async () => {
+    await mount();
+    await act(async () => pending[0]?.(success(base.contents)));
+    const result = latest?.result;
+    await update({ ...base, persisted: false, onStale: () => {} });
+    expect(latest?.result).toBe(result);
+    expect(latest?.diagnostics).toHaveLength(1);
+    await update({ ...base, onStale: () => {} });
+    expect(doubles.check).toHaveBeenCalledTimes(1);
+    expect(latest?.result).toBe(result);
+    await update({ ...base, contents: "<?php\nchanged();" });
+    expect(doubles.check).toHaveBeenCalledTimes(2);
+    expect(latest?.result).toBeNull();
+  });
+
+  it("does not restart a pending check when the source refresh callback changes", async () => {
+    await mount();
+    const refresh = vi.fn();
+    await update({ ...base, onStale: refresh });
+    expect(doubles.check).toHaveBeenCalledTimes(1);
+    await act(async () => pending[0]?.(success("<?php\nexternal();")));
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(doubles.refresh).not.toHaveBeenCalled();
   });
 
   it("drops in-flight results when process permission is revoked", async () => {

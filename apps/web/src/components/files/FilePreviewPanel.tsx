@@ -1135,7 +1135,7 @@ export default function FilePreviewPanel({
   const queryThresholds = fileCheck.result?.doctrineQueryThresholds;
   const queryAnnotations = useMemo(
     () =>
-      fileCheck.status === "checked" && file.data && relativePath && !isHostFile
+      fileCheck.result && file.data && relativePath && !isHostFile
         ? buildPhpQueryAnnotations({
             path: relativePath,
             methods: fileCheck.result?.queryBudget?.methods ?? [],

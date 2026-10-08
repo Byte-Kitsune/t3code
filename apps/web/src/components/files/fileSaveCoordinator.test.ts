@@ -14,6 +14,121 @@ function deferred() {
 }
 
 describe("FileSaveCoordinator", () => {
+  it("does not rewrite unchanged persisted contents or a successful save", async () => {
+    vi.useFakeTimers();
+    const persist = vi.fn().mockResolvedValue(AsyncResult.success(undefined));
+    const coordinator = new FileSaveCoordinator({
+      debounceMs: 500,
+      readPersistedContents: () => "original",
+      persist,
+      onPendingChange: vi.fn(),
+      onConfirmed: vi.fn(),
+    });
+    coordinator.change("original");
+    await vi.runAllTimersAsync();
+    expect(persist).not.toHaveBeenCalled();
+    coordinator.change("edited");
+    await vi.runAllTimersAsync();
+    coordinator.change("edited");
+    await vi.runAllTimersAsync();
+    coordinator.dispose();
+    expect(persist).toHaveBeenCalledExactlyOnceWith("edited");
+  });
+
+  it("keeps the original debounce when identical editor events arrive", async () => {
+    vi.useFakeTimers();
+    const persist = vi.fn().mockResolvedValue(AsyncResult.success(undefined));
+    const coordinator = new FileSaveCoordinator({
+      debounceMs: 500,
+      persist,
+      onPendingChange: vi.fn(),
+      onConfirmed: vi.fn(),
+    });
+    coordinator.change("edited");
+    await vi.advanceTimersByTimeAsync(400);
+    coordinator.change("edited");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(persist).toHaveBeenCalledExactlyOnceWith("edited");
+  });
+
+  it("cancels an edit reverted before the write starts", async () => {
+    vi.useFakeTimers();
+    const persist = vi.fn().mockResolvedValue(AsyncResult.success(undefined));
+    const pending = vi.fn();
+    const coordinator = new FileSaveCoordinator({
+      debounceMs: 500,
+      readPersistedContents: () => "original",
+      persist,
+      onPendingChange: pending,
+      onConfirmed: vi.fn(),
+    });
+    coordinator.change("edited");
+    coordinator.change("original");
+    await vi.runAllTimersAsync();
+    expect(persist).not.toHaveBeenCalled();
+    expect(pending).toHaveBeenLastCalledWith(false);
+  });
+
+  it("persists a revert to the initial contents after an in-flight write", async () => {
+    vi.useFakeTimers();
+    const inFlight = deferred();
+    const persist = vi
+      .fn()
+      .mockReturnValueOnce(inFlight.promise)
+      .mockResolvedValue(AsyncResult.success(undefined));
+    const coordinator = new FileSaveCoordinator({
+      debounceMs: 500,
+      readPersistedContents: () => "original",
+      persist,
+      onPendingChange: vi.fn(),
+      onConfirmed: vi.fn(),
+    });
+    coordinator.change("edited");
+    await vi.advanceTimersByTimeAsync(500);
+    coordinator.change("original");
+    inFlight.resolve(AsyncResult.success(undefined));
+    await vi.runAllTimersAsync();
+    expect(persist.mock.calls).toEqual([["edited"], ["original"]]);
+  });
+
+  it("does not rewrite a concurrent edit reverted to the in-flight contents", async () => {
+    vi.useFakeTimers();
+    const inFlight = deferred();
+    const persist = vi.fn().mockReturnValueOnce(inFlight.promise);
+    const coordinator = new FileSaveCoordinator({
+      debounceMs: 500,
+      persist,
+      onPendingChange: vi.fn(),
+      onConfirmed: vi.fn(),
+    });
+    coordinator.change("edited");
+    await vi.advanceTimersByTimeAsync(500);
+    coordinator.change("temporary");
+    coordinator.change("edited");
+    inFlight.resolve(AsyncResult.success(undefined));
+    await vi.runAllTimersAsync();
+    expect(persist).toHaveBeenCalledExactlyOnceWith("edited");
+  });
+
+  it("retries failed writes on an identical change event", async () => {
+    vi.useFakeTimers();
+    const persist = vi
+      .fn()
+      .mockResolvedValueOnce(AsyncResult.failure(Cause.fail(new Error("write failed"))))
+      .mockResolvedValue(AsyncResult.success(undefined));
+    const coordinator = new FileSaveCoordinator({
+      debounceMs: 500,
+      persist,
+      onPendingChange: vi.fn(),
+      onConfirmed: vi.fn(),
+    });
+    coordinator.change("edited");
+    await vi.runAllTimersAsync();
+    coordinator.change("edited");
+    await vi.runAllTimersAsync();
+    expect(persist.mock.calls).toEqual([["edited"], ["edited"]]);
+  });
+
   afterEach(() => {
     vi.useRealTimers();
   });

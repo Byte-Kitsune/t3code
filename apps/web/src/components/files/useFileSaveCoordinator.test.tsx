@@ -4,12 +4,17 @@ import { act, StrictMode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-const { writeFile, confirmFile, readScope, getUnsavedFile } = vi.hoisted(() => ({
-  writeFile: vi.fn(),
-  confirmFile: vi.fn(),
-  readScope: vi.fn(),
-  getUnsavedFile: vi.fn(),
-}));
+const { writeFile, confirmFile, readScope, getUnsavedFile, readFile, clearFile } = vi.hoisted(
+  () => ({
+    writeFile: vi.fn(),
+    confirmFile: vi.fn(),
+    readScope: vi.fn(),
+    getUnsavedFile: vi.fn(),
+    readFile: vi.fn(),
+    clearFile: vi.fn(),
+  }),
+);
+vi.mock("~/rpc/atomRegistry", () => ({ appAtomRegistry: { get: readFile } }));
 vi.mock("~/state/projects", () => ({ projectEnvironment: { writeFile: {} } }));
 vi.mock("~/state/session", () => ({
   readEnvironmentScope: readScope,
@@ -18,6 +23,8 @@ vi.mock("~/state/session", () => ({
 vi.mock("~/state/use-atom-command", () => ({ useAtomCommand: () => writeFile }));
 vi.mock("./projectFilesQueryState", () => ({
   confirmProjectFileQueryData: confirmFile,
+  clearProjectFileQueryData: clearFile,
+  getProjectFileQueryAtom: vi.fn(),
   getUnsavedProjectFileQueryData: getUnsavedFile,
 }));
 
@@ -66,6 +73,8 @@ beforeEach(() => {
   readScope.mockReset().mockReturnValue(true);
   getUnsavedFile.mockReset().mockReturnValue(null);
   onPendingChange.mockReset();
+  readFile.mockReset().mockReturnValue(AsyncResult.initial());
+  clearFile.mockReset();
 });
 
 afterEach(async () => {
@@ -75,6 +84,47 @@ afterEach(async () => {
 });
 
 describe("file-save React lifecycle", () => {
+  it("clears an unchanged optimistic draft without writing or refreshing analysis", async () => {
+    readFile.mockReturnValue(AsyncResult.success({ contents: "disk contents", truncated: false }));
+    getUnsavedFile.mockReturnValue({ contents: "disk contents" });
+    mount();
+    changeHandler()("disk contents");
+    await vi.runAllTimersAsync();
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(confirmFile).not.toHaveBeenCalled();
+    expect(clearFile).toHaveBeenCalledWith(environmentId, "/workspace", "file.txt");
+    expect(onPendingChange).toHaveBeenLastCalledWith("file.txt", false);
+  });
+
+  it("keeps a newer optimistic draft from another editor when a stale no-op arrives", async () => {
+    readFile.mockReturnValue(AsyncResult.success({ contents: "disk contents", truncated: false }));
+    mount();
+    getUnsavedFile.mockReturnValue({ contents: "newer draft" });
+    changeHandler()("disk contents");
+    expect(clearFile).not.toHaveBeenCalled();
+    expect(onPendingChange).not.toHaveBeenCalledWith("file.txt", false);
+    getUnsavedFile.mockReturnValue(null);
+    await vi.runAllTimersAsync();
+    expect(writeFile).not.toHaveBeenCalled();
+  });
+
+  it("persists a recovered draft using the raw disk baseline, not the optimistic draft", async () => {
+    readFile.mockReturnValue(AsyncResult.success({ contents: "old contents", truncated: false }));
+    getUnsavedFile.mockReturnValue({ contents: "draft contents" });
+    mount();
+    await vi.runAllTimersAsync();
+    expect(writeFile).toHaveBeenCalledTimes(1);
+    expect(writeFile.mock.calls[0]![0].input.contents).toBe("draft contents");
+  });
+
+  it("does not trust a truncated disk read as a complete baseline", async () => {
+    readFile.mockReturnValue(AsyncResult.success({ contents: "prefix", truncated: true }));
+    mount();
+    changeHandler()("prefix");
+    await vi.runAllTimersAsync();
+    expect(writeFile).toHaveBeenCalledTimes(1);
+  });
+
   it("persists editor model changes after StrictMode setup replay", async () => {
     mount();
     changeHandler()("AUDIT7907NATIVE\n");

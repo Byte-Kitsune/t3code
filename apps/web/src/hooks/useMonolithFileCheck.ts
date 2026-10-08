@@ -4,7 +4,7 @@ import {
   type EnvironmentId,
   type MonolithCheckFileResult,
 } from "@t3tools/contracts";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   analyzerContentRevision,
   fileAnalyzerDiagnostics,
@@ -16,6 +16,7 @@ import { useAtomCommand } from "~/state/use-atom-command";
 
 type CheckState = {
   key: string;
+  sourceKey: string;
   status: "checked" | "failed" | "stale";
   result?: MonolithCheckFileResult;
 };
@@ -41,39 +42,48 @@ export function useMonolithFileCheck(input: {
   );
   const revision = useMemo(
     () =>
-      !supported || !persisted || path === null || contents === null
-        ? null
-        : analyzerContentRevision(contents),
-    [contents, persisted, supported, path],
+      !supported || path === null || contents === null ? null : analyzerContentRevision(contents),
+    [contents, supported, path],
   );
-  const key = JSON.stringify([environmentId, cwd, path, revision, toolsRevision]);
+  const sourceKey = JSON.stringify([environmentId, cwd, path, revision]);
+  const key = JSON.stringify([sourceKey, toolsRevision]);
+  const staleCallback = useRef(onStale);
+  useEffect(() => {
+    staleCallback.current = onStale;
+  }, [onStale]);
   const [state, setState] = useState<CheckState | null>(null);
   const eligible =
     supported && canRead && canRun && persisted && path !== null && revision !== null;
 
   useEffect(() => {
-    if (!eligible || path === null) return;
+    if (!eligible || path === null || state?.key === key) return;
     let active = true;
     void check({ environmentId, input: { cwd, path } }).then((response) => {
       if (!active) return;
       if (response._tag === "Failure") {
-        setState({ key, status: "failed" });
+        setState({ key, sourceKey, status: "failed" });
       } else if (response.value.revision !== revision) {
         // An external write during the run invalidates line locations. Wait for
         // the file query's next revision instead of labeling the old source.
-        setState({ key, status: "stale" });
-        onStale();
+        setState({ key, sourceKey, status: "stale" });
+        staleCallback.current();
       } else {
-        setState({ key, status: "checked", result: response.value });
+        setState({ key, sourceKey, status: "checked", result: response.value });
       }
     });
     return () => {
       active = false;
     };
-  }, [check, cwd, eligible, environmentId, key, onStale, path, revision]);
+  }, [check, cwd, eligible, environmentId, key, path, revision, sourceKey, state]);
 
-  const current = eligible && state?.key === key ? state : null;
-  const result = current?.result;
+  const accessible = supported && canRead && canRun;
+  const current = accessible && state?.key === key ? state : null;
+  // A tool/dependency refresh can keep results for identical source bytes. A
+  // different file or draft must immediately lose the old line locations.
+  const result =
+    accessible && state?.sourceKey === sourceKey && state.status === "checked"
+      ? state.result
+      : undefined;
   const diagnostics = useMemo(
     () =>
       result && path !== null && contents !== null
@@ -85,9 +95,11 @@ export function useMonolithFileCheck(input: {
     supported,
     canRun: canRead && canRun,
     status: !persisted
-      ? ("unsaved" as const)
+      ? result
+        ? ("checked" as const)
+        : ("unsaved" as const)
       : (current?.status ?? (eligible ? ("checking" as const) : ("idle" as const))),
-    result: current?.result ?? null,
+    result: result ?? null,
     diagnostics,
   };
 }

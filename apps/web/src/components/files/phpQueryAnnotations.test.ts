@@ -54,6 +54,16 @@ describe("inline Doctrine query estimates", () => {
     expect(queryAnnotationSeverity(method(0, null))).toBe("warning");
     expect(queryAnnotationSeverity(method(60, null))).toBe("error");
   });
+  it("omits proven zero-query methods but retains unknown and positive estimates", () => {
+    const unknown = method(0, null);
+    const annotations = buildPhpQueryAnnotations({
+      path: "src/Queries.php",
+      lineCount: 20,
+      methods: [method(0, 0), unknown, method(0, 3), method(1, 1)],
+    });
+    expect(annotations.map(({ method }) => method.upperBound)).toEqual([null, 3, 1]);
+    expect(annotations[0]?.severity).toBe("warning");
+  });
   it("anchors boxes immediately above each method, including a method on the first source line", () => {
     const methods = [method(2, 2), { ...method(1, 3), symbol: "first", line: 1 }];
     const annotations = buildPhpQueryAnnotations({

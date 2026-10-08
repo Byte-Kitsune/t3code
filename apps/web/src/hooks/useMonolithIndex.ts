@@ -22,15 +22,31 @@ export function useMonolithIndex(
   const invalidateChecks = useAtomSet(
     monolithAnalyzerEnvironment.checkRevision(`${environmentId ?? ""}:${cwd ?? ""}`),
   );
-  const readyRevision = JSON.stringify(
-    status.data?.areas.map((area) => [area.areaId, area.status, area.revision]) ?? [],
-  );
-  const previousReady = useRef<string | null>(null);
+  const observedRevisions = useRef<{
+    destination: string;
+    areas: Map<string, string | null>;
+  } | null>(null);
   useEffect(() => {
-    if (previousReady.current !== null && previousReady.current !== readyRevision)
+    if (!status.data) return;
+    const destination = JSON.stringify([environmentId, cwd]);
+    const previous = observedRevisions.current;
+    const sameDestination = previous?.destination === destination;
+    const areas = new Map(
+      status.data.areas.map((area) => [
+        area.areaId,
+        area.revision ?? (sameDestination ? previous.areas.get(area.areaId) : null) ?? null,
+      ]),
+    );
+    // Index validation temporarily reports "indexing" even when source hashes
+    // are identical. Only a changed content/config signature invalidates checks.
+    if (
+      sameDestination &&
+      (areas.size !== previous.areas.size ||
+        [...areas].some(([id, revision]) => previous.areas.get(id) !== revision))
+    )
       invalidateChecks((value) => value + 1);
-    previousReady.current = readyRevision;
-  }, [readyRevision, invalidateChecks]);
+    observedRevisions.current = { destination, areas };
+  }, [status.data, environmentId, cwd, invalidateChecks]);
   const signature = config ? JSON.stringify(config) : null;
   const lastKey = useRef<{ destination: string; request: string } | null>(null);
   useEffect(() => {

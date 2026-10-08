@@ -92,6 +92,24 @@ describe("project indexing scheduling", () => {
     });
     expect(doubles.index).not.toHaveBeenCalled();
   });
+  it("keeps open-file results through unchanged periodic index validation", async () => {
+    doubles.data = { areas: [{ areaId: "api", status: "ready", revision: "same" }] };
+    await act(async () => {
+      renderer = create(<Probe />);
+    });
+    doubles.data = { areas: [{ areaId: "api", status: "indexing" }] };
+    await act(async () => renderer!.update(<Probe />));
+    doubles.data = { areas: [{ areaId: "api", status: "ready", revision: "same" }] };
+    await act(async () => renderer!.update(<Probe />));
+    expect(doubles.invalidate).not.toHaveBeenCalled();
+    doubles.data = { areas: [{ areaId: "api", status: "stale", revision: "changed" }] };
+    await act(async () => renderer!.update(<Probe />));
+    doubles.data = { areas: [{ areaId: "api", status: "indexing" }] };
+    await act(async () => renderer!.update(<Probe />));
+    doubles.data = { areas: [{ areaId: "api", status: "ready", revision: "changed" }] };
+    await act(async () => renderer!.update(<Probe />));
+    expect(doubles.invalidate).toHaveBeenCalledTimes(1);
+  });
   it("invalidates open-file results after a dependent source revision changes", async () => {
     doubles.data = { areas: [{ areaId: "api", status: "ready", revision: "old" }] };
     await act(async () => {

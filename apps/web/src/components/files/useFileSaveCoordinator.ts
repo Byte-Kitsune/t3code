@@ -1,6 +1,9 @@
 import { AuthFilesystemWriteScope, type EnvironmentId } from "@t3tools/contracts";
 import { createRef, useEffect, useMemo } from "react";
+import * as Option from "effect/Option";
+import { AsyncResult } from "effect/reactivity";
 
+import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { projectEnvironment } from "~/state/projects";
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -8,6 +11,8 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { FileSaveCoordinator } from "./fileSaveCoordinator";
 import {
   confirmProjectFileQueryData,
+  clearProjectFileQueryData,
+  getProjectFileQueryAtom,
   getUnsavedProjectFileQueryData,
 } from "./projectFilesQueryState";
 
@@ -36,6 +41,13 @@ export function useFileSaveCoordinator({
         const coordinator = new FileSaveCoordinator({
           debounceMs: FILE_SAVE_DEBOUNCE_MS,
           canPersist: () => readEnvironmentScope(environmentId, AuthFilesystemWriteScope),
+          readPersistedContents: () => {
+            const result = appAtomRegistry.get(
+              getProjectFileQueryAtom(environmentId, cwd, relativePath),
+            );
+            const file = Option.getOrUndefined(AsyncResult.value(result));
+            return file?.truncated ? undefined : file?.contents;
+          },
           onPendingChange: (pending) => onPendingChange(relativePath, pending),
           persist: (nextContents) =>
             writeFile({
@@ -44,6 +56,12 @@ export function useFileSaveCoordinator({
             }),
           onConfirmed: (confirmedContents) =>
             confirmProjectFileQueryData(environmentId, cwd, relativePath, confirmedContents),
+          onUnchanged: (contents) => {
+            const unsaved = getUnsavedProjectFileQueryData(environmentId, cwd, relativePath);
+            if (unsaved && unsaved.contents !== contents) return false;
+            if (unsaved) clearProjectFileQueryData(environmentId, cwd, relativePath);
+            return true;
+          },
         });
         coordinatorRef.current = coordinator;
         return () => {

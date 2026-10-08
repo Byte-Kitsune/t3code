@@ -42,6 +42,13 @@ export function buildPhpQueryAnnotations({
   const normalizedPath = phpInsightSourceTarget({ path })?.path;
   if (!normalizedPath) return [];
   return methods.flatMap((method) => {
+    if (
+      method.lowerBound === 0 &&
+      method.upperBound === 0 &&
+      method.unknown.length === 0 &&
+      method.cycles.length === 0
+    )
+      return [];
     const target = phpInsightSourceTarget(method);
     if (
       !target ||
