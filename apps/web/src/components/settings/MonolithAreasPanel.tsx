@@ -8,6 +8,7 @@ import { randomUUID } from "../../lib/utils";
 import { useProjectClone } from "../../state/projectClones";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Textarea } from "../ui/textarea";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import {
@@ -109,7 +110,7 @@ function MonolithAreaEditor({
   discover: () => Promise<readonly MonolithArea[]>;
 }) {
   const [draft, setDraft] = useState(() => createMonolithAreaDraft(config));
-  const { areas, baseBranch } = draft;
+  const { areas, baseBranch, reviewPrompt } = draft;
   const configKey = JSON.stringify(config);
   const previousConfigKey = useRef(configKey);
   const [discovered, setDiscovered] = useState<readonly MonolithArea[] | null>(null);
@@ -163,7 +164,11 @@ function MonolithAreaEditor({
   async function persist() {
     if (validationError || disabled || draft.conflictingConfig !== null) return;
     const branch = baseBranch.trim();
-    const { defaultBaseBranch: _previousBranch, ...rest } = draft.baseline;
+    const {
+      defaultBaseBranch: _previousBranch,
+      reviewPrompt: _previousPrompt,
+      ...rest
+    } = draft.baseline;
     const next = {
       ...rest,
       areas: areas.map((area) => ({
@@ -186,6 +191,7 @@ function MonolithAreaEditor({
           : {}),
       })),
       ...(branch ? { defaultBaseBranch: branch } : {}),
+      ...(reviewPrompt.trim() ? { reviewPrompt } : {}),
     };
     if (await save(next)) {
       setDraft(createMonolithAreaDraft(next));
@@ -284,6 +290,20 @@ function MonolithAreaEditor({
                 </Select>
               </div>
             </div>
+            <label className="block space-y-1 text-xs">
+              <span>Additional AI review instructions for this area</span>
+              <Textarea
+                size="sm"
+                value={area.reviewPrompt ?? ""}
+                maxLength={16_384}
+                disabled={disabled}
+                aria-label={`Area ${index + 1} review prompt`}
+                placeholder="Focus on this area’s conventions…"
+                onChange={(event) =>
+                  updateArea(area.id, { reviewPrompt: event.currentTarget.value })
+                }
+              />
+            </label>
             {area.kind === "php" ? (
               <div className="space-y-2">
                 <label className="block space-y-1 text-xs">
@@ -587,6 +607,25 @@ function MonolithAreaEditor({
             setDraft((current) => ({ ...current, baseBranch: value }));
           }}
         />
+      </label>
+      <label className="block space-y-1 text-xs">
+        <span>AI review instructions for all areas</span>
+        <Textarea
+          size="sm"
+          value={reviewPrompt}
+          maxLength={16_384}
+          disabled={disabled}
+          aria-label="Monolith review prompt"
+          placeholder="Review correctness, security and our project conventions…"
+          onChange={(event) => {
+            setSaved(false);
+            const value = event.currentTarget.value;
+            setDraft((current) => ({ ...current, reviewPrompt: value }));
+          }}
+        />
+        <p className="text-muted-foreground">
+          Saved in .t3/monolith.json. Area instructions are added to this prompt.
+        </p>
       </label>
       {dirty && validationError ? (
         <p role="alert" className="text-xs text-destructive">

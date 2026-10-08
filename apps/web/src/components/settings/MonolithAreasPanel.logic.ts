@@ -32,6 +32,7 @@ export interface MonolithAreaDraft {
   readonly baseline: MonolithConfig;
   readonly areas: readonly MonolithArea[];
   readonly baseBranch: string;
+  readonly reviewPrompt: string;
   readonly conflictingConfig: MonolithConfig | null;
 }
 
@@ -40,6 +41,7 @@ export function createMonolithAreaDraft(config: MonolithConfig): MonolithAreaDra
     baseline: config,
     areas: config.areas.map((area) => ({ ...area })),
     baseBranch: config.defaultBaseBranch ?? "",
+    reviewPrompt: config.reviewPrompt ?? "",
     conflictingConfig: null,
   };
 }
@@ -47,7 +49,8 @@ export function createMonolithAreaDraft(config: MonolithConfig): MonolithAreaDra
 export function isMonolithAreaDraftDirty(draft: MonolithAreaDraft): boolean {
   return (
     JSON.stringify(draft.areas) !== JSON.stringify(draft.baseline.areas) ||
-    draft.baseBranch.trim() !== (draft.baseline.defaultBaseBranch ?? "")
+    draft.baseBranch.trim() !== (draft.baseline.defaultBaseBranch ?? "") ||
+    draft.reviewPrompt !== (draft.baseline.reviewPrompt ?? "")
   );
 }
 
@@ -112,6 +115,8 @@ export function normalizeMonolithMagoDocker(docker: MonolithMagoDocker): Monolit
 export function validateMonolithAreas(areas: readonly MonolithArea[]): string | null {
   const paths = new Set<string>();
   for (const area of areas) {
+    if ((area.reviewPrompt?.length ?? 0) > 16_384)
+      return "Review prompts can contain up to 16,384 characters.";
     if (!area.name.trim()) return "Give every area a name.";
     if (area.name.trim().length > 200) return "Area names can contain up to 200 characters.";
     const path = normalizeMonolithAreaPath(area.path);

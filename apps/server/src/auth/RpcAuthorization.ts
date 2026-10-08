@@ -140,6 +140,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.sourceControlLookupRepository]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeProjectClones]: AuthOrchestrationReadScope,
   [WS_METHODS.projectsListEntries]: AuthFilesystemReadScope,
+  [WS_METHODS.projectsMonolithReviewGet]: AuthFilesystemReadScope,
   [WS_METHODS.projectsMonolithGet]: AuthFilesystemReadScope,
   [WS_METHODS.projectsMonolithDiscover]: AuthFilesystemReadScope,
   [WS_METHODS.projectsMonolithIndexStatus]: AuthFilesystemReadScope,

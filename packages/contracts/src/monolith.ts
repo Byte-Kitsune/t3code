@@ -104,6 +104,7 @@ export const MonolithArea = Schema.Struct({
   magoDocker: Schema.optional(MonolithMagoDocker),
   doctrineQueryThresholds: Schema.optional(MonolithDoctrineQueryThresholds),
   commentMarkers: Schema.optional(MonolithCommentMarkers),
+  reviewPrompt: Schema.optional(Schema.String.check(Schema.isMaxLength(16_384))),
   entrypointPaths: Schema.optional(Schema.Array(MonolithAreaPath).check(Schema.isMaxLength(100))),
 });
 export type MonolithArea = typeof MonolithArea.Type;
@@ -112,6 +113,7 @@ export const MonolithConfig = Schema.Struct({
   version: Schema.Literal(1),
   initialized: Schema.Literal(true),
   areas: Schema.Array(MonolithArea),
+  reviewPrompt: Schema.optional(Schema.String.check(Schema.isMaxLength(16_384))),
   defaultBaseBranch: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(200))),
 });
 export type MonolithConfig = typeof MonolithConfig.Type;

@@ -32,6 +32,20 @@ describe("monolith RPC permissions", () => {
       AuthFilesystemReadScope,
     ]);
   });
+  it("requires analyzer privileges to start and cancel a PR review", () => {
+    for (const method of [
+      WS_METHODS.projectsMonolithReviewStart,
+      WS_METHODS.projectsMonolithReviewCancel,
+    ]) {
+      expect(clientRpcRequiredScopes(method, { cwd: "/repo" })).toEqual([
+        AuthTerminalOperateScope,
+        AuthFilesystemReadScope,
+      ]);
+    }
+    expect(
+      clientRpcRequiredScopes(WS_METHODS.projectsMonolithReviewGet, { cwd: "/repo", runId: "run" }),
+    ).toEqual([]);
+  });
   it("allows discovery and non-initializing reads without filesystem write access", () => {
     expect(clientRpcRequiredScopes(WS_METHODS.projectsMonolithDiscover, { cwd: "/repo" })).toEqual(
       [],

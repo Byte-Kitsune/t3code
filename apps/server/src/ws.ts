@@ -1,3 +1,5 @@
+import * as MonolithReviewService from "./project/MonolithReviewService.ts";
+import { MonolithReviewRequestError } from "@t3tools/contracts";
 import * as MonolithIndexService from "./project/MonolithIndexService.ts";
 import * as SymfonyReferenceService from "./project/SymfonyReferenceService.ts";
 import * as MonolithAnalyzerService from "./project/MonolithAnalyzerService.ts";
@@ -1212,6 +1214,7 @@ const layerWsRpc = (
       const projectService = yield* ProjectService.ProjectService;
       const monolithService = yield* MonolithService.MonolithService;
       const monolithAnalyzers = yield* MonolithAnalyzerService.MonolithAnalyzerService;
+      const monolithReview = yield* MonolithReviewService.MonolithReviewService;
       const monolithIndex = yield* MonolithIndexService.MonolithIndexService;
       const symfonyReferences = yield* SymfonyReferenceService.SymfonyReferenceService;
       const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
@@ -2688,6 +2691,33 @@ const layerWsRpc = (
               Effect.mapError(
                 (cause) =>
                   new MonolithAnalyzerRequestError({ operation: "check", cwd: input.cwd, cause }),
+              ),
+            ),
+        [WS_METHODS.projectsMonolithReviewStart]: (input) =>
+          monolithReview
+            .start(input)
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new MonolithReviewRequestError({ operation: "start", cwd: input.cwd, cause }),
+              ),
+            ),
+        [WS_METHODS.projectsMonolithReviewGet]: (input) =>
+          monolithReview
+            .get(input)
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new MonolithReviewRequestError({ operation: "get", cwd: input.cwd, cause }),
+              ),
+            ),
+        [WS_METHODS.projectsMonolithReviewCancel]: (input) =>
+          monolithReview
+            .cancel(input)
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new MonolithReviewRequestError({ operation: "cancel", cwd: input.cwd, cause }),
               ),
             ),
         [WS_METHODS.projectsMonolithGet]: (input) =>

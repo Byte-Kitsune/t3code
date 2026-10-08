@@ -1,3 +1,4 @@
+import { MonolithPrReviewPanel } from "./MonolithPrReviewPanel";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { useAtomValue } from "@effect/atom-react";
 import type { FileDiffContentsLoader, FileDiffMetadata } from "@pierre/diffs";
@@ -205,6 +206,7 @@ export default function DiffPanel({
   composerDraftTarget,
   workspaceMutationId,
 }: DiffPanelProps) {
+  const [prReview, setPrReview] = useState(false);
   const { resolvedTheme } = useTheme();
   const settings = useClientSettings();
   const diffLayout = settings.diffLayout;
@@ -810,6 +812,9 @@ export default function DiffPanel({
   const headerRow = (
     <>
       <div className="flex min-w-0 flex-1 items-center gap-3 [-webkit-app-region:no-drag]">
+        <Button size="xs" variant="outline" onClick={() => setPrReview(true)}>
+          PR review
+        </Button>
         <DropdownMenu>
           <DropdownMenuTrigger
             render={<Button size="xs" variant="secondary" />}
@@ -1116,6 +1121,31 @@ export default function DiffPanel({
       </div>
     </>
   );
+
+  if (prReview && activeThread && activeCwd && routeThreadRef) {
+    return (
+      <DiffPanelShell
+        mode={mode}
+        header={
+          <div className="flex items-center gap-2 [-webkit-app-region:no-drag]">
+            <Button size="xs" variant="outline" onClick={() => setPrReview(false)}>
+              Back to diff
+            </Button>
+            <span className="text-xs">PR review</span>
+          </div>
+        }
+      >
+        <MonolithPrReviewPanel
+          key={`${activeThread.environmentId}:${activeCwd}`}
+          environmentId={activeThread.environmentId}
+          cwd={activeCwd}
+          threadRef={routeThreadRef}
+          composerDraftTarget={composerDraftTarget}
+          workspaceMutationId={workspaceMutationId}
+        />
+      </DiffPanelShell>
+    );
+  }
 
   return (
     <DiffPanelShell mode={mode} header={headerRow}>

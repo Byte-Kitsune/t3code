@@ -245,5 +245,25 @@ When resolving upstream conflicts, preserve these cross-layer constraints:
 Use the focused tests beside the touched services/components and scope typechecks
 to affected packages. The monolith settings and file views are implemented in the
 web client used by desktop; a native mobile monolith settings/view implementation
-has not been added. Dedicated AI PR review and project-wide panel-layout defaults
-are not implemented by these additions.
+has not been added. Project-wide panel-layout defaults remain unimplemented.
+
+## PR review mode
+
+The Changes panel includes a background PR review against a configurable base
+branch, from its merge base to HEAD or the saved working tree. Results group
+captured diffs and analyzer findings by monolith area, including rename/delete
+metadata and files outside configured areas. Global and area review prompts are
+shared through `.t3/monolith.json` without changing its version-1 format.
+
+The server retains immutable, bounded runs in memory. Preserve raw source hashes,
+configuration identity checks, full PHP dependency context, cancellation and
+compact status polling when merging upstream. Current-workspace checks cannot
+be attributed to committed-only snapshots when the workspace is dirty; source
+or configuration drift discards mixed findings. File, diff, diagnostic and AI
+packet limits must remain visible as incomplete coverage.
+
+Review packets carry provenance, tool failures and cross-area instructions into
+the existing chat draft. Sending uses the normal provider flow. Automated AI
+execution with separately persisted structured area responses and a real
+100-plus-file cross-area AI acceptance test remain follow-up work. See the
+[user guide](docs/user/monolith.md#pr-review) for the supported workflow.

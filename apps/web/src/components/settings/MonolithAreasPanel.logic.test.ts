@@ -17,6 +17,26 @@ const phpRoot: MonolithArea = { id: "php-root", name: "PHP", path: ".", kind: "p
 const config: MonolithConfig = { version: 1, initialized: true, areas: [phpRoot] };
 
 describe("Monolith area editing", () => {
+  it("preserves global and area review prompts and detects prompt conflicts", () => {
+    const configured = {
+      ...config,
+      reviewPrompt: "Global rules",
+      areas: [{ ...phpRoot, reviewPrompt: "PHP conventions", entrypointPaths: ["src/Controller"] }],
+    };
+    const draft = createMonolithAreaDraft(configured);
+    expect(draft.reviewPrompt).toBe("Global rules");
+    expect(draft.areas[0]?.reviewPrompt).toBe("PHP conventions");
+    expect(isMonolithAreaDraftDirty(draft)).toBe(false);
+    const edited = { ...draft, reviewPrompt: "Local edits" };
+    expect(isMonolithAreaDraftDirty(edited)).toBe(true);
+    const reconciled = reconcileMonolithAreaDraft(edited, {
+      ...configured,
+      reviewPrompt: "External edits",
+    });
+    expect(reconciled.reviewPrompt).toBe("Local edits");
+    expect(reconciled.conflictingConfig?.reviewPrompt).toBe("External edits");
+    expect(reconciled.areas[0]?.entrypointPaths).toEqual(["src/Controller"]);
+  });
   it("inherits extension configuration unless a T3 threshold override is explicitly enabled", () => {
     expect(createMonolithAreaDraft(config).areas[0]?.doctrineQueryThresholds).toBeUndefined();
     const custom = {

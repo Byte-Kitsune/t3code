@@ -14,6 +14,8 @@ import { WS_METHODS } from "./rpc.ts";
 export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.projectsMonolithInitialize]: AuthFilesystemWriteScope,
   [WS_METHODS.projectsMonolithSave]: AuthFilesystemWriteScope,
+  [WS_METHODS.projectsMonolithReviewStart]: AuthTerminalOperateScope,
+  [WS_METHODS.projectsMonolithReviewCancel]: AuthTerminalOperateScope,
   [WS_METHODS.projectsMonolithIndex]: AuthTerminalOperateScope,
   [WS_METHODS.projectsMonolithCheckFile]: AuthTerminalOperateScope,
   [WS_METHODS.projectsMonolithGenerateReferences]: AuthFilesystemWriteScope,
@@ -60,7 +62,9 @@ export function clientRpcRequiredScopes(
     return [AuthFilesystemWriteScope, AuthTerminalOperateScope, AuthFilesystemReadScope];
   if (
     method === WS_METHODS.projectsMonolithCheckFile ||
-    method === WS_METHODS.projectsMonolithIndex
+    method === WS_METHODS.projectsMonolithIndex ||
+    method === WS_METHODS.projectsMonolithReviewStart ||
+    method === WS_METHODS.projectsMonolithReviewCancel
   )
     return [AuthTerminalOperateScope, AuthFilesystemReadScope];
   if (method === WS_METHODS.gitPreparePullRequestThread && input !== undefined) {

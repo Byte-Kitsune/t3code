@@ -1,3 +1,10 @@
+import {
+  MonolithReviewStartInput,
+  MonolithReviewGetInput,
+  MonolithReviewCancelInput,
+  MonolithReviewRun,
+  MonolithReviewRequestError,
+} from "./monolithReview.ts";
 import { MonolithGenerateReferencesInput, MonolithGenerateReferencesResult } from "./monolith.ts";
 import {
   MonolithIndexInput,
@@ -374,6 +381,9 @@ export const WS_METHODS = {
   projectsAdd: "projects.add",
   projectsRemove: "projects.remove",
   projectsListEntries: "projects.listEntries",
+  projectsMonolithReviewStart: "projects.monolith.review.start",
+  projectsMonolithReviewGet: "projects.monolith.review.get",
+  projectsMonolithReviewCancel: "projects.monolith.review.cancel",
   projectsMonolithGet: "projects.monolith.get",
   projectsMonolithInitialize: "projects.monolith.initialize",
   projectsMonolithDiscover: "projects.monolith.discover",
@@ -1202,6 +1212,22 @@ const WsProjectsMonolithCheckFileRpc = Rpc.make(WS_METHODS.projectsMonolithCheck
   error: Schema.Union([MonolithAnalyzerRequestError, EnvironmentAuthorizationError]),
 });
 
+const WsProjectsMonolithReviewStartRpc = Rpc.make(WS_METHODS.projectsMonolithReviewStart, {
+  payload: MonolithReviewStartInput,
+  success: MonolithReviewRun,
+  error: Schema.Union([MonolithReviewRequestError, EnvironmentAuthorizationError]),
+});
+const WsProjectsMonolithReviewGetRpc = Rpc.make(WS_METHODS.projectsMonolithReviewGet, {
+  payload: MonolithReviewGetInput,
+  success: MonolithReviewRun,
+  error: Schema.Union([MonolithReviewRequestError, EnvironmentAuthorizationError]),
+});
+const WsProjectsMonolithReviewCancelRpc = Rpc.make(WS_METHODS.projectsMonolithReviewCancel, {
+  payload: MonolithReviewCancelInput,
+  success: MonolithReviewRun,
+  error: Schema.Union([MonolithReviewRequestError, EnvironmentAuthorizationError]),
+});
+
 const WsProjectsMonolithGetRpc = Rpc.make(WS_METHODS.projectsMonolithGet, {
   payload: MonolithGetInput,
   success: MonolithSnapshot,
@@ -1955,6 +1981,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectCloneCancelRpc,
   WsProjectCloneRetryRpc,
   WsSubscribeProjectClonesRpc,
+  WsProjectsMonolithReviewStartRpc,
+  WsProjectsMonolithReviewGetRpc,
+  WsProjectsMonolithReviewCancelRpc,
   WsProjectsMonolithGetRpc,
   WsProjectsMonolithInitializeRpc,
   WsProjectsMonolithDiscoverRpc,

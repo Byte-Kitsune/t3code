@@ -1,3 +1,4 @@
+import * as MonolithReviewService from "./project/MonolithReviewService.ts";
 import * as MonolithIndexService from "./project/MonolithIndexService.ts";
 import * as SymfonyReferenceService from "./project/SymfonyReferenceService.ts";
 import * as MonolithAnalyzerService from "./project/MonolithAnalyzerService.ts";
@@ -451,6 +452,11 @@ const layerWorkspace = Layer.mergeAll(
     Layer.provide(ProcessRunner.layer),
   ),
   layerMonolithAnalyzers,
+  MonolithReviewService.layer.pipe(
+    Layer.provide(layerMonolithAnalyzers),
+    Layer.provide(MonolithService.layer),
+    Layer.provide(GitVcsDriver.layer),
+  ),
   MonolithIndexService.layer.pipe(
     Layer.provide(layerMonolithAnalyzers),
     Layer.provide(MonolithService.layer),

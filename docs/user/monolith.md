@@ -18,6 +18,36 @@ separately because they cannot be opened as current files. Git uses locally know
 remote refs; the filter does not fetch from the network. A branch without a usable
 remote or base reference treats its committed files as unpublished.
 
+## PR review
+
+Open **Changes → PR review**, choose a base branch and start the analysis. The
+project's default base branch and optional global/per-area review prompts are
+stored in **Settings → Project → Monolith areas**, in `.t3/monolith.json`.
+The comparison starts at the merge base of that branch and HEAD. Enable
+**Include uncommitted changes** to include the saved working tree and untracked
+files. Save editor changes before starting; unsaved buffers are not included.
+
+Analysis runs in the background and can be cancelled. Results are grouped by
+active areas, with other files in **Other**. Expand a file for its captured diff,
+checks and PHP insights. **Open current file** opens today's workspace version;
+the captured diff remains the version from the review run.
+
+Checks use the current workspace, including unchanged PHP dependency context.
+For a committed-only comparison, a dirty workspace therefore skips checks rather
+than attributing current findings to an older commit. If source or analyzer
+configuration changes during analysis, the run discards its mixed results.
+Completed results remain captured snapshots: rerun after edits or branch changes.
+Runs are retained in server memory and disappear when the server restarts.
+
+Choose **Add review to chat** to place the grouped review packets into the current
+chat draft. Review and send them using your selected AI provider. Packets contain
+branch and hash provenance, tool findings, area prompts and a cross-area review
+instruction. Failed checks, unknown graph coverage and omitted content are
+explicitly marked; an incomplete package does not mean the code passed review.
+Large reviews have bounded diff, diagnostic and prompt sizes. Automatic checks
+skip source files above 2 MiB; files above 32 MiB cannot be captured for automatic
+analysis. Expand the package details to inspect omissions before sending.
+
 ## Separate File Viewer window
 
 On desktop, open the File Viewer and choose **Detach File Viewer**. Move its

@@ -35,6 +35,18 @@ describe("RPC authorization scopes", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
   });
 
+  it("requires filesystem access for PR snapshots and process access for review jobs", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.projectsMonolithReviewGet)).toBe(
+      AuthFilesystemReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.projectsMonolithReviewStart)).toBe(
+      AuthTerminalOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.projectsMonolithReviewCancel)).toBe(
+      AuthTerminalOperateScope,
+    );
+  });
+
   it("authorizes background policy reporting and observation deliberately", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.serverReportClientActivity)).toBe(
       AuthOrchestrationReadScope,
