@@ -294,3 +294,59 @@ describe("terminalUiStateStore actions", () => {
     expect(useTerminalUiStateStore.getState()).toBe(before);
   });
 });
+
+it("removes accidentally adopted Docker shells and logs on restart and refuses to persist them again", () => {
+  const shell = "docker-12345678-1234-1234-1234-123456789abc";
+  const key = scopedThreadKey(THREAD_REF);
+  const migrated = migratePersistedTerminalUiStateStoreState(
+    {
+      terminalUiStateByThreadKey: {
+        [key]: {
+          terminalOpen: true,
+          terminalHeight: 300,
+          terminalIds: ["term-1", shell, `${shell}-logs-1234abcd`],
+          activeTerminalId: shell,
+          terminalGroups: [
+            { id: "normal", terminalIds: ["term-1", shell] },
+            { id: "logs", terminalIds: [`${shell}-logs-1234abcd`] },
+          ],
+          activeTerminalGroupId: "logs",
+        },
+      },
+    },
+    4,
+  );
+  useTerminalUiStateStore.setState(migrated);
+  let restored = selectThreadTerminalUiState(
+    useTerminalUiStateStore.getState().terminalUiStateByThreadKey,
+    THREAD_REF,
+  );
+  expect(restored.terminalIds).toEqual(["term-1"]);
+  expect(restored.activeTerminalId).toBe("term-1");
+  expect(restored.terminalGroups).toEqual([{ id: "normal", terminalIds: ["term-1"] }]);
+  useTerminalUiStateStore.getState().reconcileTerminalIds(THREAD_REF, ["term-1", shell]);
+  restored = selectThreadTerminalUiState(
+    useTerminalUiStateStore.getState().terminalUiStateByThreadKey,
+    THREAD_REF,
+  );
+  expect(restored.terminalIds).toEqual(["term-1"]);
+});
+
+it("restores legacy terminal layouts without split groups during the Docker cleanup migration", () => {
+  const migrated = migratePersistedTerminalUiStateStoreState(
+    {
+      terminalStateByThreadKey: {
+        [scopedThreadKey(THREAD_REF)]: {
+          terminalOpen: true,
+          terminalHeight: 310,
+          terminalIds: ["term-1"],
+          activeTerminalId: "term-1",
+        },
+      },
+    },
+    1,
+  );
+  const restored = migrated.terminalUiStateByThreadKey![scopedThreadKey(THREAD_REF)]!;
+  expect(restored.terminalIds).toEqual(["term-1"]);
+  expect(restored.terminalGroups).toEqual([{ id: "group-term-1", terminalIds: ["term-1"] }]);
+});

@@ -1188,3 +1188,68 @@ describe("rightPanelStore", () => {
     ).toEqual(["terminal:term-1", "browser:tab-b", "browser:tab-c"]);
   });
 });
+
+it("drops Docker drawer sessions from restored ordinary terminal surfaces and splits", () => {
+  const shell = "docker-12345678-1234-1234-1234-123456789abc";
+  const restored = migratePersistedRightPanelState({
+    byThreadKey: {
+      "env-1:thread-A": {
+        isOpen: true,
+        activeSurfaceId: `terminal:${shell}`,
+        surfaces: [
+          {
+            id: `terminal:${shell}`,
+            kind: "terminal",
+            resourceId: shell,
+            terminalIds: [shell],
+            activeTerminalId: shell,
+          },
+          {
+            id: "terminal:term-1",
+            kind: "terminal",
+            resourceId: "term-1",
+            terminalIds: ["term-1", shell],
+            activeTerminalId: shell,
+          },
+        ],
+      },
+    },
+  });
+  expect(restored.byThreadKey["env-1:thread-A"]?.surfaces).toEqual([
+    {
+      id: "terminal:term-1",
+      kind: "terminal",
+      resourceId: "term-1",
+      terminalIds: ["term-1"],
+      activeTerminalId: "term-1",
+    },
+  ]);
+});
+
+it("keeps ordinary shells split into a former Docker-primary surface", () => {
+  const shell = "docker-12345678-1234-1234-1234-123456789abc";
+  const restored = migratePersistedRightPanelState({
+    byThreadKey: {
+      "env-1:thread-A": {
+        surfaces: [
+          {
+            id: `terminal:${shell}`,
+            kind: "terminal",
+            resourceId: shell,
+            terminalIds: [shell, "term-2"],
+            activeTerminalId: "term-2",
+          },
+        ],
+      },
+    },
+  });
+  expect(restored.byThreadKey["env-1:thread-A"]?.surfaces).toEqual([
+    {
+      id: "terminal:term-2",
+      kind: "terminal",
+      resourceId: "term-2",
+      terminalIds: ["term-2"],
+      activeTerminalId: "term-2",
+    },
+  ]);
+});

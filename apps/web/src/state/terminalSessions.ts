@@ -1,3 +1,4 @@
+import { isDockerTerminalId } from "@t3tools/shared/terminalLabels";
 import {
   combineTerminalSessionState,
   EMPTY_TERMINAL_BUFFER_STATE,
@@ -70,7 +71,9 @@ function terminalMetadataIndex(metadata: ReadonlyArray<TerminalSummary>): Termin
   let index = metadataIndexes.get(metadata);
   if (!index) {
     const compare = new Intl.Collator(undefined, { numeric: true }).compare;
-    const all = metadata.toSorted((left, right) => compare(left.terminalId, right.terminalId));
+    const all = metadata
+      .filter((terminal) => !isDockerTerminalId(terminal.terminalId))
+      .toSorted((left, right) => compare(left.terminalId, right.terminalId));
     const byThreadId = new Map<string, TerminalSummary[]>();
     for (const summary of all) {
       const group = byThreadId.get(summary.threadId);

@@ -129,6 +129,7 @@ import {
   resolveProjectPathForDispatch,
 } from "../lib/projectPaths";
 import { onOpenCommandPalette } from "../commandPaletteBus";
+import { openMonolithReview } from "../monolithReviewNavigation";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import {
@@ -1877,6 +1878,21 @@ function OpenCommandPaletteDialog(props: {
   }, [clearOpenIntent, browseNavigation, openIntent, projectThreadItems, pushPaletteView]);
 
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
+  const reviewThreadRef = activeThread
+    ? scopeThreadRef(activeThread.environmentId, activeThread.id)
+    : activeDraftThread
+      ? scopeThreadRef(activeDraftThread.environmentId, activeDraftThread.threadId)
+      : null;
+  if (reviewThreadRef && currentProjectId) {
+    actionItems.push({
+      kind: "action",
+      value: "action:monolith-pr-review",
+      title: "Open PR review",
+      searchTerms: ["PR", "review", "monolith", "changes", "diff", "analysis"],
+      icon: <FileSearchIcon className={ITEM_ICON_CLASS} />,
+      run: async () => openMonolithReview(reviewThreadRef),
+    });
+  }
 
   if (projects.length > 0) {
     const activeProjectTitle =

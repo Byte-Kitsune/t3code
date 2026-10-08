@@ -7,6 +7,7 @@
  * terminal surfaces point at terminal session ids, file surfaces point at
  * workspace paths, and diff/files remain singleton surfaces.
  */
+import { isDockerTerminalId } from "@t3tools/shared/terminalLabels";
 import {
   parseScopedThreadKey,
   scopedThreadKey,
@@ -93,7 +94,7 @@ const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
 // v11 stops persisting the pull-request list's shared panel, so a restart opens the page fresh.
 // v12 adds the device surface.
 // v14 removes the agents surface; lineage lives in the thread title bar.
-const RIGHT_PANEL_STORAGE_VERSION = 14;
+const RIGHT_PANEL_STORAGE_VERSION = 15;
 
 /** A fixed workspace-level ref: each PR surface carries its own real environment. */
 export const PULL_REQUESTS_PANEL_REF = scopeThreadRef(
@@ -507,11 +508,18 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
                             ...new Set(
                               surface.terminalIds.filter(
                                 (terminalId): terminalId is string =>
-                                  typeof terminalId === "string",
+                                  typeof terminalId === "string" && !isDockerTerminalId(terminalId),
                               ),
                             ),
                           ]
-                        : [surface.resourceId];
+                        : isDockerTerminalId(surface.resourceId)
+                          ? []
+                          : [surface.resourceId];
+                    if (terminalIds.length === 0 && isDockerTerminalId(surface.resourceId))
+                      return [];
+                    const resourceId = isDockerTerminalId(surface.resourceId)
+                      ? terminalIds[0]!
+                      : surface.resourceId;
                     const activeTerminalId =
                       "activeTerminalId" in surface &&
                       typeof surface.activeTerminalId === "string" &&
@@ -521,7 +529,9 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
                     return [
                       {
                         ...surface,
-                        terminalIds: terminalIds.length > 0 ? terminalIds : [surface.resourceId],
+                        id: `terminal:${resourceId}`,
+                        resourceId,
+                        terminalIds: terminalIds.length > 0 ? terminalIds : [resourceId],
                         activeTerminalId,
                       },
                     ];

@@ -4,7 +4,12 @@ import type { TerminalSummary } from "@t3tools/contracts";
 import { DEFAULT_TERMINAL_ID, TerminalOpenInput } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
-import { getTerminalLabel, nextTerminalId, resolveTerminalSessionLabel } from "./terminalLabels.ts";
+import {
+  isDockerTerminalId,
+  getTerminalLabel,
+  nextTerminalId,
+  resolveTerminalSessionLabel,
+} from "./terminalLabels.ts";
 
 const decodeTerminalOpen = Schema.decodeUnknownSync(TerminalOpenInput);
 
@@ -72,5 +77,15 @@ describe("nextTerminalId", () => {
         cwd: "/workspace",
       }),
     ).toMatchObject({ terminalId: second });
+  });
+});
+
+describe("Docker drawer session ownership", () => {
+  it("reserves only drawer-owned shell and log UUID ids", () => {
+    const id = "docker-12345678-1234-1234-1234-123456789abc";
+    expect(isDockerTerminalId(id)).toBe(true);
+    expect(isDockerTerminalId(`${id}-logs-1234abcd`)).toBe(true);
+    for (const ordinary of ["term-1", "docker-tools", "docker-catalog", `${id}-custom`])
+      expect(isDockerTerminalId(ordinary)).toBe(false);
   });
 });

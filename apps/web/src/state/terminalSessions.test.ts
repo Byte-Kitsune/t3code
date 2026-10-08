@@ -169,3 +169,30 @@ describe("selectKnownTerminalSessions", () => {
     expect(reads).toBe(source.length);
   });
 });
+
+it("keeps transient Docker shell/log sessions out of normal pickers as metadata arrives and disappears", () => {
+  const shell = "docker-12345678-1234-1234-1234-123456789abc";
+  const normal = summary(threadA, "term-1");
+  const metadata = [
+    normal,
+    summary(threadA, shell),
+    summary(threadA, `${shell}-logs-1234abcd`),
+    summary(threadA, "docker-tools"),
+  ];
+  expect(
+    selectKnownTerminalSessions(metadata, environmentA, threadA).map(
+      (session) => session.target.terminalId,
+    ),
+  ).toEqual(["docker-tools", "term-1"]);
+  expect(
+    selectKnownTerminalSessions(metadata, environmentA, null).map(
+      (session) => session.target.terminalId,
+    ),
+  ).toEqual(["docker-tools", "term-1"]);
+  expect(selectKnownTerminalSessions([summary(threadA, shell)], environmentA, null)).toEqual([]);
+  expect(
+    selectKnownTerminalSessions([normal], environmentA, threadA).map(
+      (session) => session.target.terminalId,
+    ),
+  ).toEqual(["term-1"]);
+});

@@ -188,6 +188,10 @@ Automatic React analyzer execution currently uses host-visible tools.
 The terminal drawer also offers configured Docker targets, recent-target ordering,
 and an optional split pane for service logs alongside the regular terminal.
 Preserve environment/project scoping and terminal permissions when merging.
+Docker drawer shell/log sessions are temporary: normal terminal selectors and
+persisted drawer/panel layouts exclude their reserved IDs. Migration removes
+accidentally adopted Docker IDs from existing layouts so app restarts do not
+reopen them as ordinary shells or accumulate duplicate sidebar entries.
 
 Anchors: [Docker execution](apps/server/src/analyzers/MagoDockerExecution.ts),
 [Docker terminal UI](apps/web/src/components/DockerTerminalDrawer.tsx), and

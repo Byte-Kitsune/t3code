@@ -5,6 +5,7 @@
  * API constrained to store actions/selectors.
  */
 
+import { isDockerTerminalId } from "@t3tools/shared/terminalLabels";
 import { parseScopedThreadKey, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { type ScopedThreadRef } from "@t3tools/contracts";
 import { create } from "zustand";
@@ -46,9 +47,19 @@ export function migratePersistedTerminalUiStateStoreState(
   const persistedUiStateByThreadKey =
     candidate.terminalUiStateByThreadKey ?? candidate.terminalStateByThreadKey ?? {};
   const terminalUiStateByThreadKey = Object.fromEntries(
-    Object.entries(persistedUiStateByThreadKey).filter(([threadKey]) =>
-      parseScopedThreadKey(threadKey),
-    ),
+    Object.entries(persistedUiStateByThreadKey)
+      .filter(([threadKey]) => parseScopedThreadKey(threadKey))
+      .map(([threadKey, state]) => [
+        threadKey,
+        normalizeThreadTerminalUiState({
+          ...createDefaultThreadTerminalUiState(),
+          ...state,
+          terminalIds: Array.isArray(state?.terminalIds)
+            ? state.terminalIds.filter((id): id is string => typeof id === "string")
+            : [],
+          terminalGroups: Array.isArray(state?.terminalGroups) ? state.terminalGroups : [],
+        }),
+      ]),
   );
 
   return { terminalUiStateByThreadKey };
@@ -63,7 +74,7 @@ function normalizeTerminalIds(terminalIds: string[]): string[] {
   const seen = new Set<string>();
   for (const id of terminalIds) {
     const trimmedId = id.trim();
-    if (trimmedId.length === 0 || seen.has(trimmedId)) continue;
+    if (trimmedId.length === 0 || seen.has(trimmedId) || isDockerTerminalId(trimmedId)) continue;
     seen.add(trimmedId);
     normalizedIds.push(trimmedId);
   }
@@ -770,7 +781,7 @@ export const useTerminalUiStateStore = create<TerminalUiStateStoreState>()(
     },
     {
       name: TERMINAL_UI_STATE_STORAGE_KEY,
-      version: 4,
+      version: 5,
       storage: createJSONStorage(createTerminalUiStateStorage),
       migrate: migratePersistedTerminalUiStateStoreState,
       partialize: (state) => ({

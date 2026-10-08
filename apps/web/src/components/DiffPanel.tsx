@@ -8,7 +8,9 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
-import type { ScopedThreadRef, RunId } from "@t3tools/contracts";
+import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { useMonolithReviewNavigation } from "../monolithReviewNavigation";
+import type { ScopedThreadRef, RunId, ProjectId } from "@t3tools/contracts";
 import {
   ArrowRightIcon,
   CheckIcon,
@@ -199,14 +201,20 @@ interface DiffPanelProps {
   mode?: DiffPanelMode;
   composerDraftTarget: ScopedThreadRef | DraftId;
   workspaceMutationId: string | null;
+  workspace?: {
+    threadRef: ScopedThreadRef;
+    projectId: ProjectId;
+    cwd: string;
+    repositoryRoot?: string | undefined;
+  };
 }
 
 export default function DiffPanel({
   mode = "inline",
   composerDraftTarget,
   workspaceMutationId,
+  workspace,
 }: DiffPanelProps) {
-  const [prReview, setPrReview] = useState(false);
   const { resolvedTheme } = useTheme();
   const settings = useClientSettings();
   const diffLayout = settings.diffLayout;
@@ -231,12 +239,36 @@ export default function DiffPanel({
   const [codeViewRevision, setCodeViewRevision] = useState(0);
   const [codeView, setCodeView] = useState<AnnotatableCodeViewHandle | null>(null);
 
-  const routeThreadRef = useParams({
+  const resolvedRouteThreadRef = useParams({
     strict: false,
     select: (params) => resolveThreadRouteRef(params),
   });
+  const routeThreadRef = workspace?.threadRef ?? resolvedRouteThreadRef;
   const activeThreadId = routeThreadRef?.threadId ?? null;
-  const activeThread = useThreadShell(routeThreadRef);
+  const serverThread = useThreadShell(resolvedRouteThreadRef);
+  const workspaceEnvironmentId = workspace?.threadRef.environmentId;
+  const workspaceThreadId = workspace?.threadRef.threadId;
+  const workspaceProjectId = workspace?.projectId;
+  const workspaceCwd = workspace?.cwd;
+  const activeThread = useMemo(
+    () =>
+      serverThread ??
+      (workspaceEnvironmentId && workspaceThreadId && workspaceProjectId && workspaceCwd
+        ? {
+            environmentId: workspaceEnvironmentId,
+            id: workspaceThreadId,
+            projectId: workspaceProjectId,
+            worktreePath: workspaceCwd,
+          }
+        : null),
+    [serverThread, workspaceEnvironmentId, workspaceThreadId, workspaceProjectId, workspaceCwd],
+  );
+  const prReview = useMonolithReviewNavigation((state) =>
+    routeThreadRef ? (state.byThreadKey[scopedThreadKey(routeThreadRef)] ?? false) : false,
+  );
+  const setPrReview = (enabled: boolean) => {
+    if (routeThreadRef) useMonolithReviewNavigation.getState().setReview(routeThreadRef, enabled);
+  };
   const activeThreadProjection = useThreadProjection(routeThreadRef)?.projection ?? null;
   const fileAccess = useFilesystemReadAccess(activeThread?.environmentId ?? null);
   const { canReadFiles } = fileAccess;
@@ -249,10 +281,10 @@ export default function DiffPanel({
         }
       : null,
   );
-  const activeCwd = activeThread?.worktreePath ?? activeProject?.workspaceRoot;
-  const activeRepositoryRoot = activeThread?.worktreePath
-    ? undefined
-    : activeProject?.repositoryIdentity?.rootPath;
+  const activeCwd = workspace?.cwd ?? activeThread?.worktreePath ?? activeProject?.workspaceRoot;
+  const activeRepositoryRoot =
+    workspace?.repositoryRoot ??
+    (activeThread?.worktreePath ? undefined : activeProject?.repositoryIdentity?.rootPath);
   const { areas: monolithAreas, config: monolithConfig } = useMonolithAreas(
     activeThread?.environmentId ?? null,
     activeCwd ?? null,

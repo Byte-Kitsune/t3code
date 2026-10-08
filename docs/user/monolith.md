@@ -20,7 +20,10 @@ remote or base reference treats its committed files as unpublished.
 
 ## PR review
 
-Open **Changes → PR review**, choose a base branch and start the analysis. The
+Open a project chat and click **PR review** in the chat header. This also works
+before sending the first message in a new chat. Alternatively, use the command
+palette and search **Open PR review**, or open the right sidebar, choose **+ →
+Changes**, then **PR review**. Choose a base branch and start the analysis. The
 project's default base branch and optional global/per-area review prompts are
 stored in **Settings → Project → Monolith areas**, in `.t3/monolith.json`.
 The comparison starts at the merge base of that branch and HEAD. Enable

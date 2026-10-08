@@ -1,5 +1,10 @@
 import type { TerminalSummary } from "@t3tools/contracts";
 
+/** Docker drawer sessions are temporary and must never become ordinary persisted terminals. */
+export function isDockerTerminalId(terminalId: string): boolean {
+  return /^docker-[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}(?:-logs-[\da-f]{8})?$/i.test(terminalId);
+}
+
 function terminalNumber(terminalId: string): string | undefined {
   return /^term(?:inal)?-(\d+)(?:-[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12})?$/i.exec(
     terminalId,
