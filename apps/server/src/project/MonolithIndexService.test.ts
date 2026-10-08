@@ -121,8 +121,8 @@ it.effect.each([
   },
   {
     message: "Symfony configuration security could not inspect this source snapshot.",
-    expectedStatus: "stale",
-    expectedCalls: 2,
+    expectedStatus: "ready",
+    expectedCalls: 1,
   },
 ] as const)(
   "distinguishes stable incomplete security sources from retryable helper failures: $expectedStatus",
@@ -399,7 +399,7 @@ it.effect("coalesces simultaneous cold file opens without a preceding project-in
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
-it.effect("retries unavailable tools after the bounded TTL without source changes", () =>
+it.effect("retains unavailable tools until source changes or an explicit retry", () =>
   Effect.gen(function* () {
     const root = yield* setup;
     let calls = 0;
@@ -411,10 +411,21 @@ it.effect("retries unavailable tools after the bounded TTL without source change
       yield* service.awaitIdle({ cwd: root });
       expect(calls).toBe(1);
       yield* TestClock.adjust("31 seconds");
-      expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("stale");
+      expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("ready");
       yield* service.checkFileCached({ cwd: root, path: "api/src/Demo.php" });
       yield* service.awaitIdle({ cwd: root });
+      expect(calls).toBe(1);
+      const validating = yield* service.index({ cwd: root });
+      expect(validating.areas[0]?.status).toBe("ready");
+      yield* service.awaitIdle({ cwd: root });
+      expect(calls).toBe(1);
+      yield* service.index({ cwd: root, force: true });
+      yield* service.awaitIdle({ cwd: root });
       expect(calls).toBe(2);
+      yield* write(root, "api/src/Caller.php", "<?php class Changed {}\n");
+      yield* service.index({ cwd: root });
+      yield* service.awaitIdle({ cwd: root });
+      expect(calls).toBe(3);
     }).pipe(
       Effect.provide(
         serviceLayer(
@@ -979,4 +990,50 @@ it.effect("invalidates source membership when a nested folder group is added or 
       ),
     );
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "does not repeat a fatal job for unchanged hashes and retries force or changed inputs",
+  () =>
+    Effect.gen(function* () {
+      const root = yield* setup;
+      let area = php;
+      let calls = 0;
+      yield* Effect.gen(function* () {
+        const service = yield* indexUse;
+        yield* service.index({ cwd: root });
+        yield* service.awaitIdle({ cwd: root });
+        expect((yield* service.status({ cwd: root })).areas[0]?.status).toBe("failed");
+        yield* TestClock.adjust("60 seconds");
+        expect((yield* service.index({ cwd: root })).areas[0]?.status).toBe("failed");
+        yield* service.awaitIdle({ cwd: root });
+        expect(calls).toBe(1);
+        yield* service.index({ cwd: root, force: true });
+        yield* service.awaitIdle({ cwd: root });
+        expect(calls).toBe(2);
+        area = { ...php, commentMarkers: [] };
+        yield* service.index({ cwd: root });
+        yield* service.awaitIdle({ cwd: root });
+        expect(calls).toBe(3);
+        yield* write(root, "api/src/Caller.php", "<?php class Changed {}\n");
+        yield* service.index({ cwd: root });
+        yield* service.awaitIdle({ cwd: root });
+        expect(calls).toBe(4);
+      }).pipe(
+        Effect.provide(
+          serviceLayer(
+            () => [area],
+            () => {
+              calls++;
+              return Effect.fail(
+                new MonolithAnalyzerService.MonolithAnalyzerError({
+                  operation: "check",
+                  reason: "file",
+                }),
+              );
+            },
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

@@ -2322,6 +2322,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         refName: details.branch,
         hasWorkingTreeChanges: details.hasWorkingTreeChanges,
         workingTree: details.workingTree,
+        ...(details.fileChanges ? { fileChanges: details.fileChanges } : {}),
         hasUpstream: details.hasUpstream,
         aheadCount: details.aheadCount,
         behindCount: details.behindCount,

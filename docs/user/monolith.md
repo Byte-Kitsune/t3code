@@ -35,6 +35,10 @@ a foreground check without waiting for the area to finish. Matching cached resul
 source hashes and area/tool configuration prevent results from another branch being reused.
 Large areas run in sequential batches. Limit errors identify the exceeded bound; other files
 can still be checked individually if automatic area indexing cannot finish.
+Unchanged hashes reuse prior results, including tool failures; they do not retry
+on a timer. After fixing the runtime (for example starting its container), use
+**Reindex** to retry explicitly. Editing source or area/tool configuration also
+invalidates matching cached results.
 
 ## Symfony configuration secrets
 

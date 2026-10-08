@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
 import * as MagoDockerExecution from "./MagoDockerExecution.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { analyzerFailureDetails } from "./analyzerFailureDetails.ts";
 
 const isDockerError = Schema.is(MagoDockerExecution.MagoDockerError);
 
@@ -51,12 +52,13 @@ export class AnalyzerExecutionError extends Schema.TaggedError<AnalyzerExecution
     tool: Schema.Literals(["mago", "biome", "eslint", "depcruise"]),
     operation: Schema.String,
     category: Schema.Literals(["input", "spawn", "timeout", "output", "report", "exit"]),
+    detail: Schema.optional(Schema.String),
     cause: Schema.Defect(),
   },
 ) {
   override get message(): string {
     if (isDockerError(this.cause)) return this.cause.message;
-    return `The ${this.tool} ${this.operation} check could not complete (${this.category}).`;
+    return `The ${this.tool} ${this.operation} check could not complete (${this.category}).${this.detail ? ` ${this.detail}` : ""}`;
   }
 }
 
@@ -320,24 +322,41 @@ function normalizeFormat(
   input: AnalyzerExecutionInput,
   stdout: string,
   paths: Path.Path,
+  reportPathToHost?: (path: string) => string,
 ): AnalyzerDiagnostic[] {
-  const diagnosticPath = relativeFile(input, input.filePath, paths);
+  let diagnosticPath = relativeFile(input, input.filePath, paths);
   if (diagnosticPath === null) throw new Error("File is outside the workspace");
-  const lines = new Set<number>();
+  const lines = new Map<string, Set<number>>();
+  const changed = (line: number) => {
+    const fileLines = lines.get(diagnosticPath!) ?? new Set<number>();
+    fileLines.add(line);
+    lines.set(diagnosticPath!, fileLines);
+  };
   let sourceLine = 1;
   let inHunk = false;
   let changedLine: number | undefined;
+  let hasHeader = false;
   for (const line of stdout.split("\n")) {
+    const header = /^diff of '(.*)':$/.exec(line);
+    if (header) {
+      diagnosticPath = relativeFile(input, header[1]!, paths, reportPathToHost);
+      if (diagnosticPath === null) throw new Error("Formatter reported an unrequested file");
+      hasHeader = true;
+      inHunk = false;
+      continue;
+    }
     const match = /^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/.exec(line);
     if (match) {
+      if ((input.filePaths?.length ?? 1) > 1 && !hasHeader)
+        throw new Error("Batch formatter diff has no file header");
       sourceLine = Math.max(1, Number(match[1]));
       inHunk = true;
       changedLine = undefined;
     } else if (inHunk && line.startsWith("-")) {
       changedLine = sourceLine;
-      lines.add(sourceLine++);
+      changed(sourceLine++);
     } else if (inHunk && line.startsWith("+")) {
-      lines.add(changedLine ?? sourceLine);
+      changed(changedLine ?? sourceLine);
     } else if (inHunk && line.startsWith(" ")) {
       sourceLine++;
       changedLine = undefined;
@@ -347,16 +366,18 @@ function normalizeFormat(
   }
   if (stdout.trim().length > 0 && lines.size === 0)
     throw new Error("Unexpected Mago format output");
-  return [...lines].map((line) => ({
-    path: diagnosticPath,
-    line,
-    column: 1,
-    severity: "warning",
-    message: "Mago would format this line.",
-    ruleId: "mago/format",
-    tool: input.tool,
-    operation: input.operation,
-  }));
+  return [...lines].flatMap(([file, fileLines]) =>
+    [...fileLines].map((line) => ({
+      path: file,
+      line,
+      column: 1,
+      severity: "warning",
+      message: "Mago would format this line.",
+      ruleId: "mago/format",
+      tool: input.tool,
+      operation: input.operation,
+    })),
+  );
 }
 
 const make = Effect.gen(function* () {
@@ -452,7 +473,7 @@ const make = Effect.gen(function* () {
                   ...(input.configPath ? ["--config", toolPath(input.configPath)] : []),
                   input.operation,
                   ...(input.operation === "format"
-                    ? ["--dry-run", toolPath(input.filePath)]
+                    ? ["--dry-run", ...(input.filePaths ?? [input.filePath]).map(toolPath)]
                     : [
                         "--reporting-format",
                         "json",
@@ -508,6 +529,7 @@ const make = Effect.gen(function* () {
       return yield* new AnalyzerExecutionError({
         ...input,
         category: "exit",
+        detail: analyzerFailureDetails(result),
         cause: new Error("Analyzer did not finish successfully"),
       });
     }
@@ -532,7 +554,7 @@ const make = Effect.gen(function* () {
             : input.tool === "biome"
               ? normalizeBiome(input, result.stdout, paths)
               : input.operation === "format"
-                ? normalizeFormat(input, result.stdout, paths)
+                ? normalizeFormat(input, result.stdout, paths, docker?.toHost)
                 : normalizeMago(input, result.stdout, paths, docker?.toHost),
       catch: (cause) => new AnalyzerExecutionError({ ...input, category: "report", cause }),
     });
@@ -540,6 +562,7 @@ const make = Effect.gen(function* () {
       return yield* new AnalyzerExecutionError({
         ...input,
         category: "exit",
+        detail: analyzerFailureDetails(result),
         cause: new Error("Formatter failed without a formatting diff"),
       });
     }

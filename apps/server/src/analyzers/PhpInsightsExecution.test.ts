@@ -52,6 +52,30 @@ function runLayer(run: ProcessRunner.ProcessRunner["Service"]["run"]) {
     Layer.provideMerge(NodeServices.layer),
   );
 }
+it.effect("identifies a failed Mago config command without exposing its output", () =>
+  Effect.gen(function* () {
+    const input = yield* setup;
+    const failure = yield* Effect.flatMap(PhpInsightsExecution.PhpInsightsExecution, (service) =>
+      service.run(input),
+    ).pipe(
+      Effect.provide(
+        runLayer(() =>
+          Effect.succeed({
+            ...output(""),
+            code: ChildProcessSpawner.ExitCode(2),
+            stderr: "TOML parse error: password='do-not-display'",
+          }),
+        ),
+      ),
+      Effect.flip,
+    );
+    expect(failure.stage).toBe("config");
+    expect(failure.message).toContain("Mago config --no-extensions failed");
+    expect(failure.message).toContain("Exit code 2");
+    expect(failure.message).toContain("could not load its configuration");
+    expect(failure.message).not.toContain("do-not-display");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
 function mockRunner(
   options: {
     malformedQuery?: boolean;

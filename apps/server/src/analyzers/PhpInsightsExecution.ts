@@ -16,6 +16,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as MagoDockerExecution from "./MagoDockerExecution.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { analyzerFailureDetails } from "./analyzerFailureDetails.ts";
 import { decodePhpQueryInsights, normalizePhpQueryInsights } from "./PhpQueryInsights.ts";
 import { preparePhpEntryInsightsReport } from "./PhpEntryInsights.ts";
 import { normalizePhpThresholdInsights } from "./PhpThresholdInsights.ts";
@@ -55,6 +56,7 @@ export class PhpInsightsExecutionError extends Schema.TaggedError<PhpInsightsExe
   "PhpInsightsExecutionError",
   {
     stage: Schema.Literals(["input", "config", "workspace", "write", "process", "report"]),
+    detail: Schema.optional(Schema.String),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -62,7 +64,7 @@ export class PhpInsightsExecutionError extends Schema.TaggedError<PhpInsightsExe
     if (isDockerError(this.cause)) return this.cause.message;
     if (this.stage === "workspace")
       return "PHP insights require the Mago workspace to match the PHP area's root. Adjust the area or its Mago workspace to refresh insights.";
-    return `PHP file insights could not complete (${this.stage}).`;
+    return `PHP file insights could not complete (${this.stage}).${this.detail ? ` ${this.detail}` : ""}`;
   }
 }
 export class PhpInsightsExecution extends Context.Service<
@@ -164,7 +166,10 @@ const make = Effect.gen(function* () {
         toolPath(referencePath),
       ]);
       if (result.code !== 0 || !/^[a-f0-9]{64}$/.test(result.stdout))
-        return yield* new PhpInsightsExecutionError({ stage: "process" });
+        return yield* new PhpInsightsExecutionError({
+          stage: "process",
+          detail: analyzerFailureDetails(result),
+        });
       return result.stdout;
     });
     const initialRemoteReference = yield* remoteReferenceStamp();
@@ -190,7 +195,10 @@ const make = Effect.gen(function* () {
         result.stdoutInvalidUtf8 ||
         result.stderrInvalidUtf8
       )
-        return yield* new PhpInsightsExecutionError({ stage: "process" });
+        return yield* new PhpInsightsExecutionError({
+          stage: "process",
+          detail: analyzerFailureDetails(result),
+        });
       return result;
     });
     const sourceStamp = Effect.fnUntraced(function* () {
@@ -259,7 +267,16 @@ const make = Effect.gen(function* () {
     ]).pipe(
       Effect.flatMap((result) => decodeJson(result.stdout)),
       Effect.flatMap((value) => Effect.try(() => object(value))),
-      Effect.mapError((cause) => new PhpInsightsExecutionError({ stage: "config", cause })),
+      Effect.mapError(
+        (cause) =>
+          new PhpInsightsExecutionError({
+            stage: "config",
+            detail: isInsightError(cause)
+              ? `Mago config --no-extensions failed. ${cause.detail ?? "Check the selected configuration in the configured runtime."}`
+              : "Mago config --no-extensions did not return a usable JSON configuration.",
+            cause,
+          }),
+      ),
     );
     const sourceConfig = yield* Effect.try(() => object(effective.source)).pipe(
       Effect.mapError((cause) => new PhpInsightsExecutionError({ stage: "config", cause })),

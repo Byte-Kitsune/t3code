@@ -241,6 +241,7 @@ const make = Effect.gen(function* () {
               ? phpSources[0]!.contents
               : contents,
             batch = indexPaths !== undefined,
+            formatPaths?: readonly string[],
           ) =>
             execution
               .run({
@@ -253,9 +254,11 @@ const make = Effect.gen(function* () {
                 sourceText: sourceContents,
                 ...(batch
                   ? {
-                      filePaths: (tool === "mago" ? phpSources : [...indexedSources.values()]).map(
-                        (source) => source.file,
-                      ),
+                      filePaths:
+                        formatPaths ??
+                        (tool === "mago" ? phpSources : [...indexedSources.values()]).map(
+                          (source) => source.file,
+                        ),
                       sourceTexts: Object.fromEntries(
                         [...indexedSources]
                           .filter(([, source]) => tool !== "mago" || /\.php$/i.test(source.file))
@@ -267,14 +270,38 @@ const make = Effect.gen(function* () {
                 ...(configPath === undefined ? {} : { configPath: path.resolve(root, configPath) }),
               })
               .pipe(Effect.result);
-          const results =
-            indexPaths !== undefined && operation === "format"
-              ? yield* Effect.forEach(
-                  tool === "mago" ? phpSources : [...indexedSources.values()],
-                  (source) => execute(source.file, source.contents, false),
-                  { concurrency: 2 },
-                )
-              : [yield* execute()];
+          // Avoid thousands of Mago/Docker startups, while keeping argv below
+          // macOS limits and individual formatter reports below output bounds.
+          const formatChunks: string[][] = [];
+          if (indexPaths !== undefined && operation === "format") {
+            let chunk: string[] = [];
+            let bytes = 0;
+            for (const source of phpSources) {
+              const nextBytes = Buffer.byteLength(source.file, "utf8") + 1;
+              if (chunk.length && (chunk.length >= 128 || bytes + nextBytes > 32_768)) {
+                formatChunks.push(chunk);
+                chunk = [];
+                bytes = 0;
+              }
+              chunk.push(source.file);
+              bytes += nextBytes;
+            }
+            if (chunk.length) formatChunks.push(chunk);
+          }
+          const results = formatChunks.length
+            ? yield* Effect.forEach(
+                formatChunks,
+                (files) =>
+                  execute(
+                    files[0]!,
+                    indexedSources.get(path.relative(root, files[0]!).split(path.sep).join("/"))
+                      ?.contents ?? contents,
+                    true,
+                    files,
+                  ),
+                { concurrency: 2 },
+              )
+            : [yield* execute()];
           const failed = results.find((result) => result._tag === "Failure");
           const result = failed ?? {
             _tag: "Success" as const,

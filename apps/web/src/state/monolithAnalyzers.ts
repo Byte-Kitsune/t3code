@@ -36,6 +36,11 @@ export const monolithAnalyzerEnvironment = {
     onSuccess: ({ environmentId, input }, registry) =>
       Effect.sync(() => {
         registry.refresh(indexStatus({ environmentId, input: { cwd: input.cwd } }));
+        if (input.force) {
+          // An explicit retry must refresh the opened file even when its hash is unchanged.
+          const version = checkRevision(`${environmentId}:${input.cwd}`);
+          registry.set(version, registry.get(version) + 1);
+        }
       }),
   }),
   checkFile: createEnvironmentRpcCommand(connectionAtomRuntime, {

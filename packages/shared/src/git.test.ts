@@ -264,6 +264,10 @@ describe("applyGitStatusStreamEvent", () => {
       hasPrimaryRemote: true,
       isDefaultRef: false,
       refName: "feature/demo",
+      fileChanges: {
+        baseRef: "origin/feature/demo",
+        files: [{ path: "src/demo.ts", kind: "modified", uncommitted: true }],
+      },
       hasWorkingTreeChanges: true,
       workingTree: {
         files: [{ path: "src/demo.ts", insertions: 1, deletions: 0 }],

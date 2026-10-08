@@ -74,6 +74,36 @@ function issue(file: string, level = "Error", line = 3) {
 }
 
 describe("AnalyzerExecution", () => {
+  it.effect("reports native exit codes and fixed hints without exposing stderr secrets", () =>
+    Effect.gen(function* () {
+      const failure = yield* runWith("", 2, base, {
+        stderr: "error: unexpected argument '--bad' found; password=do-not-display",
+      }).effect.pipe(Effect.flip);
+      expect(failure.message).toContain("Exit code 2");
+      expect(failure.message).toContain("rejected a command option");
+      expect(failure.message).not.toContain("do-not-display");
+      expect(failure.message).not.toContain("--bad");
+    }),
+  );
+  it.effect("attributes native batch formatter headers to requested files", () =>
+    Effect.gen(function* () {
+      const second = "/repo/app/src/Other.php";
+      const input = { ...base, operation: "format" as const, filePaths: [base.filePath, second] };
+      const diff =
+        "diff of 'src/Test.php':\n--- original\n+++ modified\n@@ -3,1 +3,1 @@\n- old\n+ new\ndiff of 'src/Other.php':\n--- original\n+++ modified\n@@ -8,1 +8,1 @@\n- old\n+ new\n";
+      const { effect, calls } = runWith(diff, 1, input);
+      expect((yield* effect).diagnostics.map(({ path, line }) => ({ path, line }))).toEqual([
+        { path: "app/src/Test.php", line: 3 },
+        { path: "app/src/Other.php", line: 8 },
+      ]);
+      expect(calls[0]?.args).toEqual(["format", "--dry-run", base.filePath, second]);
+      expect(
+        (yield* runWith(diff.replace("src/Other.php", "../private.php"), 1, input).effect.pipe(
+          Effect.flip,
+        )).category,
+      ).toBe("report");
+    }),
+  );
   it.effect("reads ESLint positions and filters other files without enabling fixes", () =>
     Effect.gen(function* () {
       const input = {
@@ -461,5 +491,30 @@ it.effect(
       expect(captured[0]).toContain("/srv/api/mago.toml");
       expect(captured[0]).not.toContain("/srv/api/src/Test.php");
       expect(hostCalls).toEqual([]);
+      resultOutput.stdout =
+        "diff of '/srv/api/src/Test.php':\n--- original\n+++ modified\n@@ -3,1 +3,1 @@\n- old\n+ new\ndiff of 'src/Other.php':\n--- original\n+++ modified\n@@ -8,1 +8,1 @@\n- old\n+ new\n";
+      const formatted = yield* runWith(
+        "",
+        0,
+        {
+          ...base,
+          operation: "format",
+          areaPath: "app",
+          runtime: { service: "php" },
+          filePaths: [base.filePath, "/repo/app/src/Other.php"],
+        },
+        {},
+        docker,
+      ).effect;
+      expect(formatted.diagnostics.map(({ path, line }) => ({ path, line }))).toEqual([
+        { path: "app/src/Test.php", line: 3 },
+        { path: "app/src/Other.php", line: 8 },
+      ]);
+      expect(captured[1]).toEqual([
+        "format",
+        "--dry-run",
+        "/srv/api/src/Test.php",
+        "/srv/api/src/Other.php",
+      ]);
     }),
 );

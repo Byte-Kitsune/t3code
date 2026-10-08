@@ -26,6 +26,7 @@ features, rather than a release log or a list of future tasks.
   boundaries. Red takes priority for all uncommitted changes; committed added
   files are green and committed modifications blue. Preserve the local status
   metadata across the Git driver, status contracts/subscription and file tree.
+  Remote-only status updates must retain the local `fileChanges` field.
 - The File Viewer sidebar offers a focused area tree/search and **All repository**.
   Recently used areas appear first. Selection and recency are stored locally per
   environment and project; they are not shared repository configuration.
@@ -56,6 +57,14 @@ a foreground check before its area finishes. Separate foreground/background
 queues keep a queued area batch from blocking an interactive file check; they do
 not preempt an already running external process.
 
+Unchanged fingerprints also retain failed/unavailable results instead of retrying
+native tools every 30 seconds. Explicit **Reindex** or changed source/configuration
+retries; hash validation alone must preserve settled status. Explicit retries
+refresh the opened file even when its source hash is unchanged. Fatal jobs without
+a publishable cache suppress duplicate analysis for the same known fingerprint
+during the service lifetime. Analyzer failure text exposes exit codes and fixed
+hints, never raw native output that can include source or credentials.
+
 Cache validity includes SHA-256 source hashes, analyzer/configuration dependencies,
 and area membership. Branch changes and content changes invalidate affected data.
 Interactive file checks are keyed by the SHA-256 content revision. Saving identical
@@ -69,6 +78,10 @@ part of the area signature, so moving a file into a nested area cannot reuse its
 old parent-area entry merely because its bytes stayed the same.
 
 Large areas run sequential batches of at most 2,000 files or 32 MiB of source.
+PHP formatter work within those batches uses chunks of at most 128 files or
+32 KiB of path arguments, with two formatter processes at a time. Native diff
+headers must retain exact per-file attribution, including Docker mapping.
+
 Current outer index bounds are 50,000 source files, 100,000 filesystem entries,
 256 MiB of source, and 64 MiB of serialized cache. Other file/fingerprint bounds
 and native analyzer limits still apply. Limit failures identify the exhausted

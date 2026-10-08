@@ -138,7 +138,7 @@ const make = Effect.gen(function* () {
   const running = new Set<string>();
   const completions = new Map<string, Deferred.Deferred<void>>();
   const statuses = new Map<string, MonolithAreaIndexStatus>();
-  const failedAt = new Map<string, number>();
+  const failedSignatures = new Map<string, string>();
   const memory = new Map<string, Cache>();
   const digest = (contents: string) =>
     crypto.digest("SHA-256", new TextEncoder().encode(contents)).pipe(
@@ -382,35 +382,18 @@ const make = Effect.gen(function* () {
     yield* fs.rename(temporary, file);
     memory.set(keyOf(root, area.id), cache);
   });
-  const usable = Effect.fnUntraced(function* (cache: Cache | null, signature: string) {
-    if (!cache || cache.signature !== signature) return false;
-    const degraded = cache.files.some(
-      ({ result }) =>
-        result.runs.some(
-          (run) =>
-            run.status === "unavailable" ||
-            (run.status === "failed" &&
-              run.message !==
-                "Symfony configuration security inspection was incomplete for one or more files."),
-        ) ||
-        [result.queryBudget, result.entryChains].some(
-          (insight) =>
-            insight?.status === "failed" ||
-            (insight?.status === "unavailable" &&
-              insight.message !==
-                "The opened file has no uniquely modeled method in the source graph.") ||
-            (insight?.status === "unsupported" &&
-              insight.message !== "The file is absent from the configured Mago source snapshot."),
-        ),
-    );
-    const age = (yield* Clock.currentTimeMillis) - cache.createdAt;
-    return !degraded || (age >= 0 && age < 30000);
-  });
+  // Analyzer outcomes are immutable for a source/dependency/configuration snapshot.
+  // Retry a failed tool explicitly or after its inputs change, never on a timer.
+  const usable = (cache: Cache | null, signature: string) =>
+    Effect.succeed(cache !== null && cache.signature === signature);
   const stateChecked = Effect.fnUntraced(function* (root: string, area: MonolithArea) {
     const key = keyOf(root, area.id);
     if (running.has(key)) return statuses.get(key)!;
     const before = yield* fingerprint(root, area);
     const cache = yield* loadCache(root, area);
+    const previous = statuses.get(key);
+    if (previous?.status === "failed" && failedSignatures.get(key) === before.signature)
+      return previous;
     if (yield* usable(cache, before.signature))
       return {
         areaId: area.id,
@@ -418,16 +401,12 @@ const make = Effect.gen(function* () {
         fileCount: cache!.files.length,
         revision: cache!.signature,
       };
-    const previous = statuses.get(key);
-    return previous?.status === "failed" &&
-      (yield* Clock.currentTimeMillis) - (failedAt.get(key) ?? 0) < 30000
-      ? previous
-      : {
-          areaId: area.id,
-          status: cache ? ("stale" as const) : ("idle" as const),
-          fileCount: before.files.length,
-          revision: before.signature,
-        };
+    return {
+      areaId: area.id,
+      status: cache ? ("stale" as const) : ("idle" as const),
+      fileCount: before.files.length,
+      revision: before.signature,
+    };
   });
   const state = (root: string, area: MonolithArea) =>
     stateChecked(root, area).pipe(
@@ -448,23 +427,27 @@ const make = Effect.gen(function* () {
     const cached = yield* loadCache(root, area);
     const current = statuses.get(key) ?? {
       areaId: area.id,
-      status: "idle" as const,
+      status: cached ? ("ready" as const) : ("idle" as const),
       fileCount: cached?.files.length ?? 0,
+      ...(cached ? { revision: cached.signature } : {}),
     };
-    if (
-      !force &&
-      current.status === "failed" &&
-      (yield* Clock.currentTimeMillis) - (failedAt.get(key) ?? 0) < 30000
-    )
-      return;
     const completion = yield* Deferred.make<void>();
     // State validation yields for I/O; another requester may have started this area meanwhile.
     if (running.has(key)) return;
     completions.set(key, completion);
     running.add(key);
-    statuses.set(key, { areaId: area.id, status: "indexing", fileCount: current.fileCount });
+    // Keep a settled state while validating hashes; only real analysis is indexing.
+    statuses.set(
+      key,
+      current.status === "idle" && !cached
+        ? { areaId: area.id, status: "indexing", fileCount: current.fileCount }
+        : current,
+    );
+    let attemptSignature: string | undefined;
     const work = Effect.gen(function* () {
       const before = yield* fingerprint(root, area);
+      attemptSignature = before.signature;
+      if (!force && failedSignatures.get(key) === before.signature) return;
       if (!force && (yield* usable(cached, before.signature))) {
         statuses.set(key, {
           areaId: area.id,
@@ -541,6 +524,7 @@ const make = Effect.gen(function* () {
         createdAt: yield* Clock.currentTimeMillis,
         files,
       });
+      failedSignatures.delete(key);
       statuses.set(key, {
         areaId: area.id,
         status: "ready",
@@ -555,8 +539,8 @@ const make = Effect.gen(function* () {
           : new MonolithIndexError({ operation: "index", reason: "filesystem", cause }),
       ),
       Effect.catch((error) =>
-        Effect.gen(function* () {
-          failedAt.set(key, yield* Clock.currentTimeMillis);
+        Effect.sync(() => {
+          if (attemptSignature) failedSignatures.set(key, attemptSignature);
           statuses.set(key, {
             areaId: area.id,
             status: "failed",

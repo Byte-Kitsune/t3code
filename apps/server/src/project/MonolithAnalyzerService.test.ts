@@ -476,6 +476,44 @@ it.effect("uses the configured Docker runtime despite missing host vendor and ex
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+it.effect("bounds formatter batches while retaining all files for analyze and guard", () =>
+  Effect.gen(function* () {
+    const root = yield* setup;
+    yield* write(
+      root,
+      ".t3/monolith.json",
+      JSON.stringify({
+        version: 1,
+        initialized: true,
+        areas: [{ id: "backend", name: "Backend", path: "app", kind: "php" }],
+      }),
+    );
+    const paths = Array.from({ length: 129 }, (_, index) => `app/src/File${index}.php`);
+    for (const source of paths) yield* write(root, source, "<?php class Test {}\n");
+    const checks: AnalyzerExecution.AnalyzerExecutionInput[] = [];
+    yield* Effect.flatMap(MonolithAnalyzerService.MonolithAnalyzerService, (service) =>
+      service.indexArea({ cwd: root, areaId: "backend", paths }),
+    ).pipe(
+      Effect.provide(
+        serviceLayer((input) => {
+          checks.push(input);
+          return passed();
+        }),
+      ),
+    );
+    const format = checks.filter((check) => check.operation === "format");
+    expect(format.map((check) => check.filePaths?.length)).toEqual([128, 1]);
+    expect(
+      format.flatMap((check) => check.filePaths ?? []).map((file) => file.slice(root.length + 1)),
+    ).toEqual(paths);
+    expect(
+      checks
+        .filter((check) => check.operation !== "format")
+        .every((check) => check.filePaths?.length === 129),
+    ).toBe(true);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 it.effect("indexes PHP files with one analyze/guard and one shared companion run", () =>
   Effect.gen(function* () {
     const root = yield* insightSetup;
@@ -510,17 +548,8 @@ it.effect("indexes PHP files with one analyze/guard and one shared companion run
         ),
       ),
     );
-    expect(checks.map((input) => input.operation)).toEqual([
-      "format",
-      "format",
-      "analyze",
-      "guard",
-    ]);
-    expect(
-      checks
-        .filter((input) => input.operation !== "format")
-        .every((input) => input.filePaths?.length === 2),
-    ).toBe(true);
+    expect(checks.map((input) => input.operation)).toEqual(["format", "analyze", "guard"]);
+    expect(checks.every((input) => input.filePaths?.length === 2)).toBe(true);
     expect(companions).toHaveLength(1);
     expect(result.map((item) => item.path)).toEqual(["app/src/Test.php", "app/src/Other.php"]);
     expect(
