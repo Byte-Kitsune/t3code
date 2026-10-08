@@ -52,7 +52,9 @@ PHP discovery supports Mago installed through the area's Composer project or a
 command/configuration metadata. Checks run without writing fixes. Symfony wiring
 reference generation is available from project settings. Failures report the failed
 step, process exit code or runtime limit, and a bounded stderr excerpt. Container
-JSON is never included in error details.
+JSON is never included in error details. Reference generation accepts up to 64 MiB
+per command locally and in Docker, matching the exporter's debug-view input limit;
+ordinary file-check command limits remain unchanged.
 
 React areas support Biome, ESLint, and dependency-cruiser, including installed
 workspace binaries. Discovery extracts supported analyzer commands from package

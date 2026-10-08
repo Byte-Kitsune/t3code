@@ -116,6 +116,28 @@ it.effect(
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+it.effect("applies a larger PHP output budget only to the requested command", () =>
+  Effect.gen(function* () {
+    const root = yield* fixture;
+    const docker = mock(root);
+    const session = yield* Effect.flatMap(MagoDockerExecution.MagoDockerExecution, (service) =>
+      service.prepare({
+        workspaceRoot: root,
+        areaPath: "artifact/api",
+        runtime: { service: "php-api" },
+      }),
+    ).pipe(Effect.provide(docker.layer));
+    yield* session.runPhp(["bin/console", "debug:container"], { APP_ENV: "dev" }, undefined, {
+      maxOutputBytes: 64 * 1024 * 1024,
+    });
+    expect(docker.calls.at(-1)?.maxOutputBytes).toBe(64 * 1024 * 1024);
+    yield* session.runPhp(["tools/check.php"]);
+    expect(docker.calls.at(-1)?.maxOutputBytes).toBe(4_000_000);
+    yield* session.runMago(["analyze"]);
+    expect(docker.calls.at(-1)?.maxOutputBytes).toBe(4_000_000);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 it.effect.each([
   { stopped: true, stage: "service" },
   { mounted: false, stage: "mount" },

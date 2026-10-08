@@ -13,6 +13,12 @@ import * as AnalyzerDiscoveryService from "./AnalyzerDiscoveryService.ts";
 import * as MonolithService from "./MonolithService.ts";
 import * as SymfonyReferenceService from "./SymfonyReferenceService.ts";
 
+const largeDebugView = JSON.stringify({
+  definitions: {},
+  aliases: {},
+  padding: "x".repeat(4_100_000),
+});
+
 const encodeRequestError = Schema.encodeEffect(Schema.fromJsonString(MonolithAnalyzerRequestError));
 const decodeRequestError = Schema.decodeUnknownEffect(
   Schema.fromJsonString(MonolithAnalyzerRequestError),
@@ -65,6 +71,18 @@ const runWith = (
       const output = outputs[calls.length] ?? { stdout: "{}" };
       calls.push(input);
       if (output.failure) return Effect.fail(output.failure);
+      const observedBytes = Buffer.byteLength(output.stdout);
+      if (input.maxOutputBytes !== undefined && observedBytes > input.maxOutputBytes)
+        return Effect.fail(
+          new ProcessRunner.ProcessOutputLimitError({
+            command: input.command,
+            argumentCount: input.args.length,
+            cwd: input.cwd,
+            stream: "stdout",
+            maxBytes: input.maxOutputBytes,
+            observedBytes,
+          }),
+        );
       return Effect.succeed({
         stdout: output.stdout,
         stderr: output.stderr ?? "",
@@ -125,7 +143,11 @@ it.layer(base)("SymfonyReferenceService", (it) => {
         }),
       );
       const calls: Array<ProcessRunner.ProcessRunInput> = [];
-      const remoteCalls: { args: readonly string[]; env?: NodeJS.ProcessEnv }[] = [];
+      const remoteCalls: {
+        args: readonly string[];
+        env?: NodeJS.ProcessEnv;
+        maxOutputBytes?: number;
+      }[] = [];
       const staged = new Map<string, string>();
       let removed = false;
       const transport = MagoDockerExecution.MagoDockerExecution.of({
@@ -154,10 +176,10 @@ it.layer(base)("SymfonyReferenceService", (it) => {
                   removed = true;
                 }),
             ),
-            runPhp: (args, env) => {
-              remoteCalls.push({ args, ...(env ? { env } : {}) });
+            runPhp: (args, env, _stdin, options) => {
+              remoteCalls.push({ args, ...(env ? { env } : {}), ...options });
               return Effect.succeed({
-                stdout: remoteCalls.length === 3 ? '{"reference":"container"}' : "{}",
+                stdout: remoteCalls.length === 3 ? '{"reference":"container"}' : largeDebugView,
                 stderr: "",
                 code: ChildProcessSpawner.ExitCode(0),
                 timedOut: false,
@@ -173,6 +195,9 @@ it.layer(base)("SymfonyReferenceService", (it) => {
       const result = yield* runWith(root, calls, [], transport);
       expect(calls).toEqual([]);
       expect(remoteCalls).toHaveLength(3);
+      for (const call of remoteCalls) expect(call.maxOutputBytes).toBe(64 * 1024 * 1024);
+      expect(staged.get("types.json")).toBe(largeDebugView);
+      expect(staged.get("services.json")).toBe(largeDebugView);
       expect(remoteCalls[0]!.args[0]).toBe("/srv/api/bin/console");
       expect(remoteCalls[2]!.args).toEqual([
         "/srv/api/tools/vendor/byte-kitsune/mago-symfony-wiring/bin/create-container-reference.php",
@@ -180,12 +205,7 @@ it.layer(base)("SymfonyReferenceService", (it) => {
         "--services=/tmp/t3-reference/services.json",
         "--autoload=/srv/api/vendor/autoload.php",
       ]);
-      expect(staged).toEqual(
-        new Map([
-          ["types.json", "{}"],
-          ["services.json", "{}"],
-        ]),
-      );
+      expect([...staged.keys()]).toEqual(["types.json", "services.json"]);
       expect(removed).toBe(true);
       expect(yield* fs.readFileString(`${root}/${result.path}`)).toBe(
         '{"reference":"container"}\n',
@@ -245,8 +265,8 @@ it.layer(base)("SymfonyReferenceService", (it) => {
         const paths = yield* Path.Path;
         const calls: Array<ProcessRunner.ProcessRunInput> = [];
         const result = yield* runWith(root, calls, [
-          { stdout: '{"types":[]}' },
-          { stdout: '{"services":[]}' },
+          { stdout: largeDebugView },
+          { stdout: largeDebugView },
           { stdout: '{"reference":"dev"}' },
         ]);
         expect(result).toEqual({
@@ -260,7 +280,7 @@ it.layer(base)("SymfonyReferenceService", (it) => {
           expect(call.command).toBe("php");
           expect(call.cwd).toBe(paths.join(root, "api"));
           expect(call.timeout).toBe(60_000);
-          expect(call.maxOutputBytes).toBe(4_000_000);
+          expect(call.maxOutputBytes).toBe(64 * 1024 * 1024);
           expect(call.args).not.toContain("--show-hidden");
         }
         expect(calls[0]!.args).toContain("--env=dev");

@@ -11,6 +11,9 @@ import * as MagoDockerExecution from "../analyzers/MagoDockerExecution.ts";
 import * as AnalyzerDiscoveryService from "./AnalyzerDiscoveryService.ts";
 import * as MonolithService from "./MonolithService.ts";
 
+// Match the Symfony wiring exporter's per-view input limit; ordinary file checks stay bounded at 4 MB.
+const referenceOutputLimit = 64 * 1024 * 1024;
+
 const isDockerError = Schema.is(MagoDockerExecution.MagoDockerError);
 const isProcessError = Schema.is(ProcessRunner.ProcessRunError);
 const processFailureDetail = (cause: unknown): string => {
@@ -163,7 +166,11 @@ const make = Effect.gen(function* () {
     ) {
       const failure = (cause: unknown) => new SymfonyReferenceError({ areaId, stage, cause });
       const processEffect = docker
-        ? docker.runPhp(args, { APP_ENV: "dev", APP_DEBUG: "1" }).pipe(Effect.mapError(failure))
+        ? docker
+            .runPhp(args, { APP_ENV: "dev", APP_DEBUG: "1" }, undefined, {
+              maxOutputBytes: referenceOutputLimit,
+            })
+            .pipe(Effect.mapError(failure))
         : runner
             .run({
               command: "php",
@@ -171,7 +178,7 @@ const make = Effect.gen(function* () {
               cwd: appRoot,
               env: { ...process.env, APP_ENV: "dev", APP_DEBUG: "1" },
               timeout: 60_000,
-              maxOutputBytes: 4_000_000,
+              maxOutputBytes: referenceOutputLimit,
               outputMode: "error",
               timeoutBehavior: "error",
             })

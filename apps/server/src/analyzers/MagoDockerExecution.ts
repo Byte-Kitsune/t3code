@@ -44,6 +44,7 @@ export interface MagoDockerSession {
     args: readonly string[],
     env?: NodeJS.ProcessEnv,
     stdin?: string,
+    options?: { readonly maxOutputBytes?: number },
   ) => Effect.Effect<ProcessRunner.ProcessRunOutput, MagoDockerError>;
   readonly exists: (hostPath: string) => Effect.Effect<boolean, MagoDockerError>;
   readonly allocateTemp: Effect.Effect<MagoDockerTemp, MagoDockerError, Scope.Scope>;
@@ -271,7 +272,8 @@ const make = Effect.gen(function* () {
         maxBytes,
       );
     };
-    const runPhp: MagoDockerSession["runPhp"] = (args, env, stdin) => exec("php", args, env, stdin);
+    const runPhp: MagoDockerSession["runPhp"] = (args, env, stdin, options) =>
+      exec("php", args, env, stdin, options?.maxOutputBytes);
     const exists: MagoDockerSession["exists"] = (hostPath) =>
       Effect.try(() => toContainer(hostPath)).pipe(
         Effect.flatMap((file) => exec("test", ["-f", file])),
