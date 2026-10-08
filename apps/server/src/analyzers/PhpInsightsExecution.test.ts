@@ -186,7 +186,14 @@ function mockRunner(
       expect(config.analyzer.ignore).toEqual(["mixed-argument"]);
       expect(config.threads).toBe(options.expectedThreads ?? 2);
       expect(config["extension-hosts"]["t3-insights"]).toEqual({
-        command: ["php", "-d", "memory_limit=1G", expect.stringContaining("worker.php")],
+        command: [
+          "php",
+          "-d",
+          "display_errors=stderr",
+          "-d",
+          "memory_limit=1G",
+          expect.stringContaining("worker.php"),
+        ],
         workers: 1,
       });
       expect(Object.keys(config["extension-hosts"])).toEqual(["t3-insights"]);
@@ -431,6 +438,8 @@ it.effect.each(["missing", "stable", "changed"] as const)(
                   "t3-insights": {
                     command: [
                       "php",
+                      "-d",
+                      "display_errors=stderr",
                       "-d",
                       "memory_limit=1G",
                       "/tmp/t3-insights-fixture/worker.php",

@@ -532,7 +532,10 @@ const make = Effect.gen(function* () {
             typeof effective.threads === "number" && effective.threads > 0 ? effective.threads : 2,
           ),
           "extension-hosts": {
-            "t3-insights": { command: ["php", "-d", "memory_limit=1G", worker], workers: 1 },
+            "t3-insights": {
+              command: ["php", "-d", "display_errors=stderr", "-d", "memory_limit=1G", worker],
+              workers: 1,
+            },
           },
           analyzer: {
             ...object(effective.analyzer),

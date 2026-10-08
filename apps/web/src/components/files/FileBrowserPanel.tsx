@@ -288,6 +288,7 @@ export default function FileBrowserPanel({
       const clicked = await api.contextMenu.show(
         [
           ...fileMenuItems,
+          { id: "copy-path", label: "Copy path" },
           { id: "copy-mention", label: "Copy mention" },
           { id: "add-to-chat", label: "Add to chat" },
         ],
@@ -302,14 +303,19 @@ export default function FileBrowserPanel({
         await fileContextMenu.activate(clicked as FileContextMenuAction, fileTarget);
         return;
       }
-      if (clicked === "copy-mention") {
+      if (clicked === "copy-path" || clicked === "copy-mention") {
+        const copyingPath = clicked === "copy-path";
         try {
-          await writeTextToClipboard(mention);
-          toastManager.add({ type: "success", title: "Mention copied", description: relativePath });
+          await writeTextToClipboard(copyingPath ? relativePath : mention);
+          toastManager.add({
+            type: "success",
+            title: copyingPath ? "Path copied" : "Mention copied",
+            description: relativePath,
+          });
         } catch (error) {
           toastManager.add({
             type: "error",
-            title: "Failed to copy mention",
+            title: copyingPath ? "Failed to copy path" : "Failed to copy mention",
             description: error instanceof Error ? error.message : "An error occurred.",
           });
         }

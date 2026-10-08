@@ -15,11 +15,19 @@ const mocks = vi.hoisted(() => ({
     uncommitted: boolean;
   }[],
   refreshGit: vi.fn(),
+  contextMenu: vi.fn(async (_items: readonly unknown[], _position: unknown) => "copy-path"),
+  clipboard: vi.fn(async (_value: string) => true),
+  toast: vi.fn(),
   areas: [
     { id: "php", name: "Catalog", path: "artifact/catalog", kind: "php" },
     { id: "docs", name: "Docs", path: "docs", kind: "folder" },
   ],
 }));
+vi.mock("~/localApi", () => ({
+  readLocalApi: () => ({ contextMenu: { show: mocks.contextMenu } }),
+}));
+vi.mock("~/hooks/useCopyToClipboard", () => ({ writeTextToClipboard: mocks.clipboard }));
+vi.mock("~/components/ui/toast", () => ({ toastManager: { add: mocks.toast } }));
 vi.mock("~/state/vcs", () => ({ vcsEnvironment: { status: () => null } }));
 vi.mock("~/state/query", () => ({
   useEnvironmentQuery: () => ({
@@ -97,6 +105,9 @@ describe("file browser group switching", () => {
     mocks.search.mockClear();
     mocks.changes = [];
     mocks.refreshGit.mockClear();
+    mocks.contextMenu.mockReset().mockResolvedValue("copy-path");
+    mocks.clipboard.mockReset().mockResolvedValue(true);
+    mocks.toast.mockClear();
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.stubGlobal("window", { localStorage: storage });
     vi.stubGlobal("document", { addEventListener: () => {}, removeEventListener: () => {} });
@@ -107,6 +118,50 @@ describe("file browser group switching", () => {
     vi.unstubAllGlobals();
   });
   const model = () => renderer!.root.findByType(FileTree).props.model;
+  const openContextMenu = async (path: string, close: () => void) => {
+    await act(async () => {
+      model()
+        .getComposition()
+        .contextMenu.onOpen(
+          { path, name: path.split("/").at(-1), kind: "file" },
+          {
+            anchorElement: { getBoundingClientRect: () => ({ left: 0, bottom: 20 }) },
+            close,
+          },
+        );
+    });
+  };
+  it("copies the canonical project-relative path from a nested monolith group", async () => {
+    await act(async () => {
+      renderer = create(<FileBrowserPanel {...props} />);
+    });
+    const close = vi.fn();
+    await openContextMenu("artifact/catalog/src/Demo.php", close);
+    expect(mocks.contextMenu.mock.calls[0]?.[0]).toEqual(
+      expect.arrayContaining([
+        { id: "copy-path", label: "Copy path" },
+        { id: "copy-mention", label: "Copy mention" },
+        { id: "add-to-chat", label: "Add to chat" },
+      ]),
+    );
+    expect(mocks.clipboard).toHaveBeenCalledWith("artifact/catalog/src/Demo.php");
+    expect(close).toHaveBeenCalledOnce();
+    expect(props.onOpenFile).not.toHaveBeenCalled();
+  });
+  it("reports clipboard failure and closes the menu without claiming success", async () => {
+    mocks.clipboard.mockRejectedValueOnce(new Error("Clipboard access denied"));
+    await act(async () => {
+      renderer = create(<FileBrowserPanel {...props} />);
+    });
+    const close = vi.fn();
+    await openContextMenu("artifact/catalog/src/Demo.php", close);
+    expect(mocks.toast).toHaveBeenCalledWith({
+      type: "error",
+      title: "Failed to copy path",
+      description: "Clipboard access denied",
+    });
+    expect(close).toHaveBeenCalledOnce();
+  });
   it("focuses only the active group and switches to full repo without changing canonical paths", async () => {
     await act(async () => {
       renderer = create(<FileBrowserPanel {...props} />);

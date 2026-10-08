@@ -38,6 +38,8 @@ features, rather than a release log or a list of future tasks.
   coordinators must never retry after ownership moves. Closing the detached
   window returns its files to the chat. Other threads in the same workspace
   use the detached editor rather than opening a competing writer.
+- File-browser context menus can copy the project-root-relative path, including
+  the full area prefix when viewing a grouped subtree.
 
 Key boundaries: [area contracts](packages/contracts/src/monolith.ts),
 [area service](apps/server/src/project/MonolithService.ts),
@@ -62,6 +64,9 @@ or file check does not serialize unrelated areas. Background indexing retains
 its global two-job budget and yields to opened-file requests in the same area.
 Batch status includes the current analyzer phase; opened-file failures expose
 the server's diagnostic message instead of only changing the status label.
+Large Symfony references require `mago-symfony-wiring` 1.1.1 or newer: the
+exporter and loader accept matching 64 MiB references. Generated PHP insight
+workers send PHP errors to stderr to preserve the binary protocol channel.
 PHP insights preserve nested native exit/timeout details and Docker process
 limits, including cached failed snapshot attempts.
 
