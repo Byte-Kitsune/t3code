@@ -43,6 +43,7 @@ import {
   ProjectFaviconPickerDialog,
 } from "./ProjectFaviconPickerDialog";
 import { ProjectActionsSettings } from "./ProjectActionsSettings";
+import { MonolithAreasPanel } from "./MonolithAreasPanel";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { projectGroupTitleNeedsUpdate } from "./ProjectSettingsPanel.logic";
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
@@ -538,6 +539,17 @@ function ProjectDetail({
         </SettingsSection>
         <ProjectDefaultsSettings category="project" />
         <ProjectActionsSettings />
+        {group.memberProjects.map((member) => (
+          <MonolithAreasPanel
+            key={member.physicalProjectKey}
+            environmentId={member.environmentId}
+            projectId={member.id}
+            cwd={member.workspaceRoot}
+            {...(hasMultipleCheckouts
+              ? { checkoutLabel: member.environmentLabel ?? member.workspaceRoot }
+              : {})}
+          />
+        ))}
         {hasMultipleCheckouts ? checkoutChoices : null}
         <SettingsSection title="Danger">
           <SettingsRow

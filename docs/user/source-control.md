@@ -229,3 +229,45 @@ the scope and merge strategy. GitHub rebases the remaining stack after merging.
 It can rewrite history and restart checks. If a layer fails, earlier updates remain; resolve that
 layer before retrying. GitHub may require manual conflict resolution after a lower layer is amended,
 even when its changes look independent. Stack actions require an environment that supports them.
+
+## Monolith areas
+
+This fork groups local and pull-request diffs by application or folder. Opening a project for the
+first time discovers PHP projects from `composer.json` and React projects from `package.json`,
+including applications nested under folders such as `artifact/` and `artifact-test/`.
+Dependencies, build output, symbolic links, and PHP tools installations inside an application's
+`tools/` tree are excluded from discovery.
+
+Open the project's **Settings → Project → Monolith areas** to rename, add, remove, or exclude
+areas. A **Folder** area can group documentation, infrastructure, or any other directory without
+PHP or React. **Rescan** offers new applications to add; it keeps your saved choices. When areas
+overlap, the deepest folder wins. An excluded deeper folder goes to **Other**, which appears after
+the configured groups. Use the diff file tree's area selector to review one group at a time.
+
+Areas are saved in `t3.monolith.json` at the checkout root. Commit this file to share the grouping
+with your team. Reading through a connection without filesystem write access does not create it.
+Invalid existing configuration is reported instead of replaced.
+
+```json
+{
+  "version": 1,
+  "initialized": true,
+  "defaultBaseBranch": "origin/develop",
+  "areas": [
+    { "id": "api", "name": "API", "path": "artifact/api", "kind": "php" },
+    { "id": "portal", "name": "Portal", "path": "artifact/portal", "kind": "react" },
+    { "id": "infra", "name": "Infrastructure", "path": "infra", "kind": "folder" },
+    {
+      "id": "fixtures",
+      "name": "Fixtures",
+      "path": "artifact-test",
+      "kind": "folder",
+      "enabled": false
+    }
+  ]
+}
+```
+
+The optional default base branch supplies the local Changes comparison target until you choose
+another branch. A hosted pull request keeps its own target branch. Analyzer execution and AI
+review are separate planned features; area grouping itself does not run Mago or Biome checks.

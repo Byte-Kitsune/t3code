@@ -30,6 +30,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings";
 import { useTheme } from "~/hooks/useTheme";
+import { useMonolithAreas } from "~/hooks/useMonolithAreas";
+import {
+  groupFilesByMonolithArea,
+  monolithAreaGroupKey,
+  type MonolithAreaBoundary,
+} from "@t3tools/shared/monolithAreas";
 import { areAllDiffFilesCollapsed } from "~/lib/diffCollapse";
 import { pullRequestFindingKey, type PullRequestFinding } from "./pullRequestDetail.logic";
 import { canEditPullRequestComment } from "./pullRequestEditing.logic";
@@ -222,6 +228,14 @@ function PullRequestCodeTab({
 }) {
   const { resolvedTheme } = useTheme();
   const settings = useClientSettings();
+  const { areas: monolithAreas } = useMonolithAreas(environmentId, detail.workspaceRoot, {
+    initialize: false,
+  });
+  const [areaSelection, setAreaSelection] = useState<{
+    scopeKey: string;
+    areas: ReadonlyArray<MonolithAreaBoundary>;
+    key: string | null;
+  } | null>(null);
   const [toggledFiles, setToggledFiles] = useState<ReadonlySet<string>>(() => new Set());
   // A change of any size can carry hundreds of commits, and a menu that long is a scroll rather
   // than a choice. The rest arrive ten at a time, on request.
@@ -560,9 +574,36 @@ function PullRequestCodeTab({
     [commit, detail.reviewThreads, draft, files, pendingComments, placedThreadIds],
   );
 
+  const selectedAreaKey =
+    areaSelection?.scopeKey === scopeKey && areaSelection.areas === monolithAreas
+      ? areaSelection.key
+      : null;
+  const setSelectedAreaKey = useCallback(
+    (key: string | null) => setAreaSelection({ scopeKey, areas: monolithAreas, key }),
+    [scopeKey, monolithAreas],
+  );
+  const activeAreaKey =
+    selectedAreaKey === "other" ||
+    monolithAreas.some(
+      (area) => area.enabled !== false && monolithAreaGroupKey(area) === selectedAreaKey,
+    )
+      ? selectedAreaKey
+      : null;
+  // Configured area order takes precedence across pages; the default viewer keeps slice order.
+  const visibleAnnotatedFiles = useMemo(
+    () =>
+      monolithAreas.some((area) => area.enabled !== false)
+        ? groupFilesByMonolithArea(annotatedFiles, monolithAreas, (file) => ({
+            path: file.path,
+          })).flatMap((group) =>
+            activeAreaKey === null || group.key === activeAreaKey ? group.files : [],
+          )
+        : annotatedFiles,
+    [activeAreaKey, annotatedFiles, monolithAreas],
+  );
   const items = useMemo<CodeViewDiffItem<ReviewAnnotationGroup>[]>(
     () =>
-      annotatedFiles.map(({ fileKey, path, fileDiff, annotations, annotationsVersion }) => {
+      visibleAnnotatedFiles.map(({ fileKey, path, fileDiff, annotations, annotationsVersion }) => {
         const collapsed = isFileDiffCollapsed(fileKey, effectiveFoldOverride, toggledFiles);
         // Ticking a file that is already folded changes no fold, so without this the box on
         // screen would keep saying the opposite of what the count says.
@@ -579,7 +620,7 @@ function PullRequestCodeTab({
         };
       }),
     [
-      annotatedFiles,
+      visibleAnnotatedFiles,
       filesViewedEnabled,
       effectiveFoldOverride,
       isFileViewed,
@@ -1530,6 +1571,9 @@ function PullRequestCodeTab({
             <DiffFileTree
               ariaLabel={`Pull request #${detail.number} files`}
               entries={fileTreeEntries}
+              areas={monolithAreas}
+              selectedAreaKey={activeAreaKey}
+              onSelectedAreaChange={setSelectedAreaKey}
               onSelectFile={revealFile}
               // The tree lists only what has arrived; a footer says so while the diff is still
               // paging, and lets the reader pull the rest in without scrolling for it.

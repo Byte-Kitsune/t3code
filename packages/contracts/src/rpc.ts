@@ -1,3 +1,10 @@
+import {
+  MonolithArea,
+  MonolithGetInput,
+  MonolithSaveInput,
+  MonolithSnapshot,
+  MonolithRequestError,
+} from "./monolith.ts";
 import { OrchestrationDispatchCommandError } from "./orchestrationDispatch.ts";
 import {
   McpAppCallToolInput,
@@ -357,6 +364,10 @@ export const WS_METHODS = {
   projectsAdd: "projects.add",
   projectsRemove: "projects.remove",
   projectsListEntries: "projects.listEntries",
+  projectsMonolithGet: "projects.monolith.get",
+  projectsMonolithInitialize: "projects.monolith.initialize",
+  projectsMonolithDiscover: "projects.monolith.discover",
+  projectsMonolithSave: "projects.monolith.save",
   projectsReadFile: "projects.readFile",
   projectsSearchContents: "projects.searchContents",
   projectsSearchEntries: "projects.searchEntries",
@@ -1147,6 +1158,27 @@ const WsSourceControlPublishRepositoryRpc = Rpc.make(WS_METHODS.sourceControlPub
   error: Schema.Union([SourceControlRepositoryError, EnvironmentAuthorizationError]),
 });
 
+const WsProjectsMonolithGetRpc = Rpc.make(WS_METHODS.projectsMonolithGet, {
+  payload: MonolithGetInput,
+  success: MonolithSnapshot,
+  error: Schema.Union([MonolithRequestError, EnvironmentAuthorizationError]),
+});
+const WsProjectsMonolithInitializeRpc = Rpc.make(WS_METHODS.projectsMonolithInitialize, {
+  payload: MonolithGetInput,
+  success: MonolithSnapshot,
+  error: Schema.Union([MonolithRequestError, EnvironmentAuthorizationError]),
+});
+const WsProjectsMonolithDiscoverRpc = Rpc.make(WS_METHODS.projectsMonolithDiscover, {
+  payload: MonolithGetInput,
+  success: Schema.Array(MonolithArea),
+  error: Schema.Union([MonolithRequestError, EnvironmentAuthorizationError]),
+});
+const WsProjectsMonolithSaveRpc = Rpc.make(WS_METHODS.projectsMonolithSave, {
+  payload: MonolithSaveInput,
+  success: MonolithSnapshot,
+  error: Schema.Union([MonolithRequestError, EnvironmentAuthorizationError]),
+});
+
 const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntries, {
   payload: ProjectSearchEntriesInput,
   success: ProjectSearchEntriesResult,
@@ -1879,6 +1911,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectCloneCancelRpc,
   WsProjectCloneRetryRpc,
   WsSubscribeProjectClonesRpc,
+  WsProjectsMonolithGetRpc,
+  WsProjectsMonolithInitializeRpc,
+  WsProjectsMonolithDiscoverRpc,
+  WsProjectsMonolithSaveRpc,
   WsProjectsListEntriesRpc,
   WsProjectsReadFileRpc,
   WsProjectsSearchContentsRpc,

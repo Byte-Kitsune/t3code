@@ -1,3 +1,4 @@
+import * as MonolithService from "./project/MonolithService.ts";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Clock from "effect/Clock";
 import * as Random from "effect/Random";
@@ -408,6 +409,7 @@ const layerWorkspaceFileSystem = WorkspaceFileSystem.layer.pipe(
 );
 
 const layerWorkspace = Layer.mergeAll(
+  MonolithService.layer,
   WorkspacePaths.layer,
   layerWorkspaceEntries,
   layerWorkspaceFileSystem,

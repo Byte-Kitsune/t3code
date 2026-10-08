@@ -3,6 +3,7 @@ import { preloadFileTree } from "@pierre/trees";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  groupedDiffFileTreeEntries,
   buildDiffFileTreeUpdates,
   compareDiffFileTreeEntries,
   collectDirectoryPaths,
@@ -113,5 +114,59 @@ describe("buildDiffFileTreeUpdates", () => {
 
   it("produces nothing when the paths are unchanged", () => {
     expect(buildDiffFileTreeUpdates(["src/a.ts"], ["src/a.ts"])).toEqual([]);
+  });
+});
+
+describe("monolith diff tree navigation", () => {
+  const areas = [
+    { id: "php", name: "Backend/API", path: "src", kind: "php" as const },
+    { id: "react", name: "Frontend", path: "src/web", kind: "react" as const },
+  ];
+  const entries = [
+    { path: "README.md", status: "modified" as const },
+    { path: "src/web/app.tsx", status: "renamed" as const, previousPath: "src/old.php" },
+    { path: "src/deleted.php", status: "deleted" as const },
+  ];
+
+  it("separates configured roots while retaining real paths for file navigation", () => {
+    const result = groupedDiffFileTreeEntries(entries, areas, null);
+    expect(result.treeEntries.map((entry) => entry.path)).toEqual([
+      "src/deleted.php",
+      "src/web/app.tsx",
+      "README.md",
+    ]);
+    expect(result.groups.map((group) => group.name)).toEqual(["Backend/API", "Frontend", "Other"]);
+    const tree = preloadFileTree({
+      paths: result.treeEntries.map((entry) => entry.treePath),
+      initialExpansion: "open",
+      flattenEmptyDirectories: false,
+      sort: compareDiffFileTreeEntries(() =>
+        diffFileTreePositions(result.treeEntries.map((entry) => entry.treePath)),
+      ),
+    });
+    expect(tree.shadowHtml).toContain("Backend · API · PHP");
+    expect(tree.shadowHtml).toContain("Frontend · React");
+    expect(tree.shadowHtml).toContain("Other");
+  });
+
+  it("keeps group row ids stable when a later PR page fills an empty area", () => {
+    const first = groupedDiffFileTreeEntries([entries[0]!, entries[2]!], areas, null);
+    const later = groupedDiffFileTreeEntries(entries, areas, null);
+    expect(first.treeEntries.find((entry) => entry.path === "README.md")?.treePath).toBe(
+      later.treeEntries.find((entry) => entry.path === "README.md")?.treePath,
+    );
+  });
+
+  it("filters Other and disabled groups while keeping the unconfigured tree unchanged", () => {
+    expect(
+      groupedDiffFileTreeEntries(entries, areas, "other").treeEntries.map((entry) => entry.path),
+    ).toEqual(["README.md"]);
+    expect(
+      groupedDiffFileTreeEntries(
+        entries,
+        areas.map((area) => ({ ...area, enabled: false })),
+        null,
+      ).treeEntries,
+    ).toEqual(entries.map((entry) => ({ ...entry, treePath: entry.path })));
   });
 });

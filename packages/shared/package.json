@@ -406,6 +406,10 @@
     "./mcpApp": {
       "types": "./src/mcpApp.ts",
       "import": "./src/mcpApp.ts"
+    },
+    "./monolithAreas": {
+      "types": "./src/monolithAreas.ts",
+      "import": "./src/monolithAreas.ts"
     }
   },
   "scripts": {

@@ -2,11 +2,38 @@ import type { FileDiffMetadata } from "@pierre/diffs";
 import type { FileTreeBatchOperation, FileTreeSortComparator, GitStatus } from "@pierre/trees";
 
 import { resolveFileDiffPath } from "~/lib/diffRendering";
+import { groupFilesByMonolithArea, type MonolithAreaBoundary } from "@t3tools/shared/monolithAreas";
 
 /** One changed file as the tree shows it: its current path and how it changed. */
 export interface DiffFileTreeEntry {
   readonly path: string;
+  readonly previousPath?: string;
   readonly status: GitStatus;
+}
+
+/** Virtual group folders are tree ids only; every action still uses the real repository path. */
+export function groupedDiffFileTreeEntries(
+  entries: ReadonlyArray<DiffFileTreeEntry>,
+  areas: ReadonlyArray<MonolithAreaBoundary>,
+  selectedAreaKey: string | null,
+) {
+  const enabledAreas = areas.filter((area) => area.enabled !== false);
+  const grouped = enabledAreas.length > 0;
+  const groups = grouped ? groupFilesByMonolithArea(entries, areas, (entry) => entry) : [];
+  const treeEntries = grouped
+    ? groups.flatMap((group) => {
+        if (selectedAreaKey !== null && selectedAreaKey !== group.key) return [];
+        const index =
+          group.area === null
+            ? enabledAreas.length
+            : enabledAreas.findIndex((area) => area.id === group.area?.id);
+        const label = group.name.replace(/[\\/]/g, " · ");
+        const kind = group.area?.kind;
+        const folder = `${index + 1}. ${label}${kind && kind !== "folder" ? ` · ${kind === "php" ? "PHP" : "React"}` : ""}`;
+        return group.files.map((entry) => ({ ...entry, treePath: `${folder}/${entry.path}` }));
+      })
+    : entries.map((entry) => ({ ...entry, treePath: entry.path }));
+  return { groups, treeEntries };
 }
 
 function toGitStatus(file: FileDiffMetadata): GitStatus {

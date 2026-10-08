@@ -33,6 +33,13 @@ import { cn } from "~/lib/utils";
 import { selectThreadDiffPanelSelection, useDiffPanelStore } from "../diffPanelStore";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useTheme } from "../hooks/useTheme";
+import { useMonolithAreas } from "~/hooks/useMonolithAreas";
+import {
+  groupFilesByMonolithArea,
+  matchMonolithArea,
+  monolithAreaGroupKey,
+  type MonolithAreaBoundary,
+} from "@t3tools/shared/monolithAreas";
 import {
   buildFileDiffContentVersion,
   buildFileDiffIdentityKey,
@@ -210,6 +217,11 @@ export default function DiffPanel({
     Schema.Boolean,
   );
   const [baseRefQuery, setBaseRefQuery] = useState("");
+  const [areaSelection, setAreaSelection] = useState<{
+    scopeKey: string | null;
+    areas: ReadonlyArray<MonolithAreaBoundary>;
+    key: string | null;
+  } | null>(null);
   const [collapsedDiffFiles, setCollapsedDiffFiles] = useState<CollapsedDiffFilesState>(() => ({
     scopeKey: null,
     fileKeys: EMPTY_COLLAPSED_DIFF_FILE_KEYS,
@@ -239,6 +251,11 @@ export default function DiffPanel({
   const activeRepositoryRoot = activeThread?.worktreePath
     ? undefined
     : activeProject?.repositoryIdentity?.rootPath;
+  const { areas: monolithAreas, config: monolithConfig } = useMonolithAreas(
+    activeThread?.environmentId ?? null,
+    activeCwd ?? null,
+    { initialize: false },
+  );
   const serverConfig = useAtomValue(
     serverEnvironment.configValueAtom(activeThread?.environmentId ?? null),
   );
@@ -288,6 +305,7 @@ export default function DiffPanel({
   const selectedRunId = diffSelection.kind === "turn" ? diffSelection.turnId : null;
   const selectedGitScope = diffSelection.kind === "unstaged" ? "unstaged" : "branch";
   const selectedBaseRef = diffSelection.kind === "branch" ? diffSelection.baseRef : null;
+  const effectiveBaseRef = selectedBaseRef ?? monolithConfig?.defaultBaseBranch ?? null;
   const selectedFilePath = diffSelection.kind === "turn" ? diffSelection.filePath : null;
   const selectedFileRevealRequestId =
     diffSelection.kind === "turn" ? diffSelection.revealRequestId : 0;
@@ -345,7 +363,7 @@ export default function DiffPanel({
           environmentId: activeThread.environmentId,
           input: {
             cwd: activeCwd,
-            ...(selectedBaseRef ? { baseRef: selectedBaseRef } : {}),
+            ...(effectiveBaseRef ? { baseRef: effectiveBaseRef } : {}),
             ignoreWhitespace: diffIgnoreWhitespace,
           },
         })
@@ -362,7 +380,7 @@ export default function DiffPanel({
           environmentId: activeThread.environmentId,
           input: {
             cwd: serverConfig.cwd,
-            ...(selectedBaseRef ? { baseRef: selectedBaseRef } : {}),
+            ...(effectiveBaseRef ? { baseRef: effectiveBaseRef } : {}),
             ignoreWhitespace: diffIgnoreWhitespace,
           },
         })
@@ -502,7 +520,7 @@ export default function DiffPanel({
     environmentId: activeThread?.environmentId,
     cwd: branchDiffPreview.data?.cwd,
     source: lazySource,
-    baseRef: lazySource?.baseRef ?? selectedBaseRef,
+    baseRef: lazySource?.baseRef ?? effectiveBaseRef,
     ignoreWhitespace: diffIgnoreWhitespace,
     theme: resolvedTheme,
     revision: branchDiffPreview.data
@@ -510,6 +528,22 @@ export default function DiffPanel({
       : undefined,
     preview: renderablePatch,
   });
+  const selectedAreaKey =
+    areaSelection?.scopeKey === collapseScopeKey && areaSelection.areas === monolithAreas
+      ? areaSelection.key
+      : null;
+  const setSelectedAreaKey = useCallback(
+    (key: string | null) =>
+      setAreaSelection({ scopeKey: collapseScopeKey, areas: monolithAreas, key }),
+    [collapseScopeKey, monolithAreas],
+  );
+  const activeAreaKey =
+    selectedAreaKey === "other" ||
+    monolithAreas.some(
+      (area) => area.enabled !== false && monolithAreaGroupKey(area) === selectedAreaKey,
+    )
+      ? selectedAreaKey
+      : null;
   const refreshBranchDiffPreview = refreshPreviewQuery;
 
   useEffect(() => {
@@ -552,9 +586,20 @@ export default function DiffPanel({
       ) : null,
     [settledFileCount, renderableFiles.length, loadNextFiles],
   );
+  const groupedRenderableFileEntries = useMemo(
+    () =>
+      monolithAreas.some((area) => area.enabled !== false)
+        ? groupFilesByMonolithArea(renderableFileEntries, monolithAreas, ({ fileDiff }) => ({
+            path: resolveFileDiffPath(fileDiff),
+          })).flatMap((group) =>
+            activeAreaKey === null || group.key === activeAreaKey ? group.files : [],
+          )
+        : renderableFileEntries,
+    [activeAreaKey, monolithAreas, renderableFileEntries],
+  );
   const codeViewFiles = useMemo(
     () =>
-      renderableFileEntries
+      groupedRenderableFileEntries
         .filter(({ fileDiff }) => !lazySource || readyFilePaths.has(resolveFileDiffPath(fileDiff)))
         .map(({ fileDiff, fileKey, fileVersion }) => {
           return {
@@ -568,7 +613,7 @@ export default function DiffPanel({
               fileDiff.cacheKey?.endsWith(":pending") === true,
           };
         }),
-    [collapsedDiffFileKeys, renderableFileEntries, lazySource, readyFilePaths],
+    [collapsedDiffFileKeys, groupedRenderableFileEntries, lazySource, readyFilePaths],
   );
   const diffFileKeys = useMemo(
     () => renderableFileEntries.map((file) => file.fileKey),
@@ -613,6 +658,11 @@ export default function DiffPanel({
       );
       const file = renderableFileEntries[index];
       if (!file) return;
+      if (
+        activeAreaKey !== null &&
+        monolithAreaGroupKey(matchMonolithArea({ path: filePath }, monolithAreas)) !== activeAreaKey
+      )
+        setSelectedAreaKey(null);
       setCollapsedDiffFiles((current) => {
         const next = new Set(
           current.scopeKey === collapseScopeKey ? current.fileKeys : defaultCollapsedDiffFileKeys,
@@ -627,6 +677,9 @@ export default function DiffPanel({
     },
     [
       renderableFileEntries,
+      activeAreaKey,
+      monolithAreas,
+      setSelectedAreaKey,
       collapseScopeKey,
       defaultCollapsedDiffFileKeys,
       requestTreeReveal,
@@ -865,7 +918,11 @@ export default function DiffPanel({
                     className="w-full min-w-0 grid-cols-[1rem_minmax(0,1fr)]"
                     value={AUTOMATIC_BASE_REF}
                   >
-                    <span className="block min-w-0 truncate">Automatic</span>
+                    <span className="block min-w-0 truncate">
+                      {monolithConfig?.defaultBaseBranch
+                        ? `Automatic (${monolithConfig.defaultBaseBranch})`
+                        : "Automatic"}
+                    </span>
                   </ComboboxItem>
                   {baseRefChoices.map((choice) => {
                     const item = valueForBaseRefChoice(choice);
@@ -1240,6 +1297,9 @@ export default function DiffPanel({
                     <DiffFileTree
                       ariaLabel={`${reviewSectionTitle} files`}
                       entries={fileTreeEntries}
+                      areas={monolithAreas}
+                      selectedAreaKey={activeAreaKey}
+                      onSelectedAreaChange={setSelectedAreaKey}
                       selectedPath={selectedFilePath}
                       revealRequestId={selectedFileRevealRequestId}
                       onSelectFile={revealDiffFile}

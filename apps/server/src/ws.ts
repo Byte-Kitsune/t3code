@@ -1,3 +1,5 @@
+import { MonolithRequestError } from "@t3tools/contracts";
+import * as MonolithService from "./project/MonolithService.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
@@ -1200,6 +1202,7 @@ const layerWsRpc = (
       const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
       const projectStore = yield* ProjectStore.ProjectStoreV2;
       const projectService = yield* ProjectService.ProjectService;
+      const monolithService = yield* MonolithService.MonolithService;
       const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
 
@@ -2627,6 +2630,39 @@ const layerWsRpc = (
                 }),
             ),
           ),
+        [WS_METHODS.projectsMonolithGet]: (input) =>
+          monolithService
+            .get({ ...input, initialize: false })
+            .pipe(
+              Effect.mapError(
+                (cause) => new MonolithRequestError({ operation: "get", cwd: input.cwd, cause }),
+              ),
+            ),
+        [WS_METHODS.projectsMonolithInitialize]: (input) =>
+          monolithService
+            .get({ ...input, initialize: true })
+            .pipe(
+              Effect.mapError(
+                (cause) => new MonolithRequestError({ operation: "get", cwd: input.cwd, cause }),
+              ),
+            ),
+        [WS_METHODS.projectsMonolithDiscover]: (input) =>
+          monolithService
+            .discover(input)
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new MonolithRequestError({ operation: "discover", cwd: input.cwd, cause }),
+              ),
+            ),
+        [WS_METHODS.projectsMonolithSave]: (input) =>
+          monolithService
+            .save(input)
+            .pipe(
+              Effect.mapError(
+                (cause) => new MonolithRequestError({ operation: "save", cwd: input.cwd, cause }),
+              ),
+            ),
         [WS_METHODS.projectsReadFile]: (input) =>
           workspaceFileSystem.readFile(input).pipe(
             Effect.mapError(
