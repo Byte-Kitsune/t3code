@@ -25,6 +25,7 @@ export default function ReadOnlySourcePreview(props: {
   readonly text: string;
   readonly cacheKey?: string;
   readonly diagnostics?: readonly MonolithAnalyzerDiagnostic[];
+  readonly onTokenClick?: FileOptions<FileAnalyzerAnnotationGroup, undefined>["onTokenClick"];
   readonly onPostRender?: FileOptions<FileAnalyzerAnnotationGroup, undefined>["onPostRender"];
 }) {
   const { resolvedTheme } = useTheme();
@@ -53,6 +54,7 @@ export default function ReadOnlySourcePreview(props: {
             preferredHighlighter: PREFERRED_HIGHLIGHTER,
             themeType: resolvedTheme,
             unsafeCSS: FILE_LINK_REVEAL_UNSAFE_CSS,
+            ...(props.onTokenClick ? { onTokenClick: props.onTokenClick } : {}),
             ...(props.onPostRender ? { onPostRender: props.onPostRender } : {}),
           }}
           className="min-h-full"

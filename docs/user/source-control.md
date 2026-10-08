@@ -309,6 +309,12 @@ explicit failure instead of inspecting or linking the wrong source tree.
 Query ranges describe one invocation; unresolved calls and recursion remain visible as unknown
 bounds. An injected service alone does not prove a method call.
 
+In the file source view, **Ctrl-click** a PHP class or method name (**Cmd-click** on macOS) to
+inspect direct callers and entry call chains. Class selection groups its modeled methods. Select a
+usage or chain step to open the file at that line; the PHP insights panel also offers call graph
+buttons. Navigation uses saved source and is unavailable while edits or graph refreshes are pending.
+Dynamic calls and class instantiation may remain unresolved; the view shows method call evidence.
+
 In **Monolith areas**, configure PHP **Entry folders** relative to that area, for example
 `app/Http, src/Command`. They are shared as `entrypointPaths` in `.t3/monolith.json`; the defaults are
 `src/Controller` and `src/Command`. An existing `.mago/architecture-policy.json` with an enabled

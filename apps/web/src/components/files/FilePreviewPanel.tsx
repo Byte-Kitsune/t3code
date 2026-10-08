@@ -22,6 +22,7 @@ import {
   type FileContents,
   type PostRenderPhase,
   type SelectedLineRange,
+  type TokenEventBase,
 } from "@pierre/diffs";
 import {
   Editor,
@@ -100,6 +101,8 @@ import SourceFilePreview from "./ReadOnlySourcePreview";
 import { FileAnalyzerAnnotation } from "./FileAnalyzerAnnotation";
 import { FileAnalyzerStatus } from "./FileAnalyzerStatus";
 import { PhpFileInsights } from "./PhpFileInsights";
+import { PhpCallGraphDialog, type PhpGraphSelection } from "./PhpCallGraphDialog";
+import { openPhpSourceCallGraph } from "./phpSourceClick";
 import {
   mergeFileAnalyzerAnnotations,
   type FileAnalyzerAnnotationGroup,
@@ -652,6 +655,7 @@ interface EditableFileSurfaceProps {
   wordWrap: boolean;
   onPostRender: FilePostRender;
   onPendingChange: (relativePath: string, pending: boolean) => void;
+  onTokenClick?: (token: TokenEventBase, event: MouseEvent) => void;
 }
 
 interface FileSelectionOverride {
@@ -671,6 +675,7 @@ function EditableFileSurface({
   wordWrap,
   onPostRender,
   onPendingChange,
+  onTokenClick,
 }: EditableFileSurfaceProps) {
   const addReviewComment = useComposerDraftStore((store) => store.addReviewComment);
   const removeReviewComment = useComposerDraftStore((store) => store.removeReviewComment);
@@ -918,6 +923,7 @@ function EditableFileSurface({
               onGutterUtilityClick: setSelectedRange,
               onLineSelectionChange: setSelectedRange,
               onLineSelectionEnd: handleLineSelectionEnd,
+              ...(onTokenClick ? { onTokenClick } : {}),
               overflow: wordWrap ? "wrap" : "scroll",
               theme: resolveDiffThemeName(resolvedTheme),
               preferredHighlighter: PREFERRED_HIGHLIGHTER,
@@ -1088,6 +1094,49 @@ export default function FilePreviewPanel({
       !selectedFilePending &&
       file.data?.truncated === false,
   });
+  const sourceGraph = fileCheck.result?.entryChains;
+  const graphReady =
+    fileCheck.status === "checked" &&
+    sourceGraph !== undefined &&
+    (sourceGraph.status === "complete" || sourceGraph.status === "incomplete") &&
+    relativePath !== null &&
+    /\.php$/i.test(relativePath) &&
+    !isHostFile &&
+    file.data?.truncated === false &&
+    !file.hasUnsavedChanges &&
+    !selectedFilePending;
+  const graphFileKey = JSON.stringify([environmentId, cwd, relativePath]);
+  const [graphSelection, setGraphSelection] = useState<{
+    fileKey: string;
+    graph: NonNullable<typeof sourceGraph>;
+    selection: PhpGraphSelection;
+  } | null>(null);
+  // A saved source change or switch invalidates call locations immediately.
+  if (
+    graphSelection &&
+    (!graphReady || graphSelection.fileKey !== graphFileKey || graphSelection.graph !== sourceGraph)
+  )
+    setGraphSelection(null);
+  const openSourceGraph = useCallback(
+    (selection: PhpGraphSelection) => {
+      if (graphReady && sourceGraph)
+        setGraphSelection({ fileKey: graphFileKey, graph: sourceGraph, selection });
+    },
+    [graphReady, sourceGraph, graphFileKey],
+  );
+  const onSourceTokenClick = useCallback(
+    (token: TokenEventBase, event: MouseEvent) => {
+      if (!graphReady || !sourceGraph || !file.data) return;
+      openPhpSourceCallGraph({
+        token,
+        event,
+        contents: file.data.contents,
+        targets: sourceGraph.targets,
+        onOpen: openSourceGraph,
+      });
+    },
+    [file.data, graphReady, sourceGraph, openSourceGraph],
+  );
   const attemptedPath = file.readError?.resolvedPath ?? file.readError?.operationPath;
   // A chat link cannot tell a folder from a file, so a folder arrives here as
   // a file surface and the read fails. Keep the breadcrumbs, drop the preview
@@ -1354,10 +1403,24 @@ export default function FilePreviewPanel({
               key={`${environmentId}:${cwd}:${previewPath}`}
               check={fileCheck}
               onOpenFile={onOpenFile}
+              {...(graphReady
+                ? {
+                    onOpenSymbol: (target) =>
+                      openSourceGraph({ kind: "method", symbol: target.symbol, targets: [target] }),
+                  }
+                : {})}
             />
           ) : null}
         </>
       ) : null}
+      <PhpCallGraphDialog
+        incomplete={sourceGraph?.status === "incomplete"}
+        selection={
+          graphReady && graphSelection?.graph === sourceGraph ? graphSelection.selection : null
+        }
+        onClose={() => setGraphSelection(null)}
+        onOpenFile={onOpenFile}
+      />
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div
           className={cn("min-w-0 flex-1 flex-col overflow-hidden", previewPath ? "flex" : "hidden")}
@@ -1468,6 +1531,7 @@ export default function FilePreviewPanel({
                 cacheKey={projectFileCacheKey(cwd, relativePath, file.data.contents)}
                 onPostRender={onFilePostRender}
                 diagnostics={fileCheck.diagnostics}
+                {...(graphReady ? { onTokenClick: onSourceTokenClick } : {})}
               />
             ) : (
               <DiffWorkerPoolProvider>
@@ -1479,6 +1543,7 @@ export default function FilePreviewPanel({
                   composerDraftTarget={composerDraftTarget}
                   contents={file.data.contents}
                   diagnostics={fileCheck.diagnostics}
+                  {...(graphReady ? { onTokenClick: onSourceTokenClick } : {})}
                   resolvedTheme={resolvedTheme}
                   revealRequestId={revealRequestId}
                   wordWrap={wordWrap}

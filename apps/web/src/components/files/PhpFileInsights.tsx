@@ -46,9 +46,13 @@ function AnalysisStatus({
 export function PhpFileInsights({
   check,
   onOpenFile,
+  onOpenSymbol,
 }: {
   check: ReturnType<typeof useMonolithFileCheck>;
   onOpenFile: OpenFile;
+  onOpenSymbol?: (
+    target: NonNullable<MonolithCheckFileResult["entryChains"]>["targets"][number],
+  ) => void;
 }) {
   const queries = check.result?.queryBudget;
   const callers = check.result?.entryChains;
@@ -106,6 +110,12 @@ export function PhpFileInsights({
         <details className="mt-2">
           <summary className="cursor-pointer font-medium">Entry files and callers</summary>
           <AnalysisStatus insight={callers} />
+          {onOpenSymbol ? (
+            <p className="text-muted-foreground">
+              Ctrl-click (⌘-click on Mac) a modeled class or method in the source to open its call
+              graph.
+            </p>
+          ) : null}
           {callers.targets.length === 0 && callers.status === "complete" ? (
             <p>No symbols were reported for this file.</p>
           ) : null}
@@ -116,6 +126,11 @@ export function PhpFileInsights({
                 {target.serviceId ? ` (${target.serviceId})` : ""} — {target.entries.length} entry{" "}
                 {target.entries.length === 1 ? "chain" : "chains"}
               </summary>
+              {onOpenSymbol ? (
+                <Button variant="link" size="micro" onClick={() => onOpenSymbol(target)}>
+                  Open call graph for {target.symbol}
+                </Button>
+              ) : null}
               <p className="text-muted-foreground">Direct callers</p>
               {target.directCallers.length ? (
                 <ul>
